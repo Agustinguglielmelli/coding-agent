@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "openai": "^6.38.0"
+  }
+}

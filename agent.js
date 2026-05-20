@@ -3,13 +3,15 @@ import dotenv from "dotenv";
 import readline from "readline";
 import fs from "fs";
 import { execSync } from "child_process";
+import { dirname } from "path";  // fix: reemplaza require("path")
 dotenv.config();
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.GEMINI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
 });
 
-const MODEL = "gpt-5-nano";
+const MODEL = "models/gemini-2.5-flash";
 
 // ============================================================
 // TOOLS — implementación
@@ -28,7 +30,7 @@ function read_file(path) {
 
 function write_file({ path, content }) {
   try {
-    fs.mkdirSync(require("path").dirname(path), { recursive: true });
+    fs.mkdirSync(dirname(path), { recursive: true }); // fix: usar dirname importado
     fs.writeFileSync(path, content, "utf-8");
     console.log(`✅ write_file("${path}")`);
     return `Archivo escrito exitosamente: ${path}`;
@@ -77,6 +79,13 @@ async function web_search({ query }) {
       }),
     });
     const data = await res.json();
+
+    // fix: manejar el caso donde data.results es undefined
+    if (!data.results) {
+      console.log(`❌ web_search: respuesta inesperada de Tavily:`, data);
+      return `Error: Tavily no devolvió resultados. Detalle: ${JSON.stringify(data)}`;
+    }
+
     const results = data.results
       .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.content}`)
       .join("\n\n");
@@ -129,7 +138,7 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "Comando a ejecutar. Ej: 'ls -la' o 'node index.js'" },
+          command: { type: "string", description: "Comando a ejecutar." },
         },
         required: ["command"],
       },
@@ -143,7 +152,7 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          directory: { type: "string", description: "Path del directorio a listar. Ej: '.' o 'src/'" },
+          directory: { type: "string", description: "Path del directorio a listar." },
         },
         required: ["directory"],
       },
@@ -153,7 +162,7 @@ const tools = [
     type: "function",
     function: {
       name: "web_search",
-      description: "Busca información en la web y devuelve los resultados. Usá esta tool cuando necesites información externa o documentación.",
+      description: "Busca información en la web. Usá esta tool cuando necesites información externa o documentación.",
       parameters: {
         type: "object",
         properties: {
@@ -222,7 +231,6 @@ async function main() {
       const message = response.choices[0].message;
 
       if (message.tool_calls) {
-        // El LLM quiere usar una o más tools
         messages.push(message);
 
         for (const toolCall of message.tool_calls) {
@@ -242,9 +250,7 @@ async function main() {
             content: String(result),
           });
         }
-
       } else {
-        // El LLM respondió sin pedir tools → fin del turno
         messages.push(message);
         console.log("\n" + message.content + "\n");
         break;

@@ -14,11 +14,11 @@ const client = new OpenAI({
 const MODEL = "models/gemini-2.5-flash";
 
 // ============================================================
-// SUPERVISIÓN — activar/desactivar acá
+// FLAGS — activar/desactivar acá
 // ============================================================
-let SUPERVISION = true; // true = pide confirmación | false = ejecuta directo
+let SUPERVISION = true;  // pide confirmación antes de write_file y run_command
+let PLAN_MODE = true;    // genera un plan antes de ejecutar cualquier tool
 
-// Tools que requieren confirmación cuando SUPERVISION está activo
 const SUPERVISED_TOOLS = ["write_file", "run_command"];
 
 // ============================================================
@@ -186,6 +186,28 @@ const toolFunctions = {
 };
 
 // ============================================================
+// PLAN MODE — pedir plan al LLM antes de ejecutar
+// ============================================================
+
+async function getPlan(userMessage) {
+  const response = await client.chat.completions.create({
+    model: MODEL,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Sos un agente de código. Cuando recibas una tarea, describí el plan de pasos que seguirías para completarla. Listá los pasos numerados, sin ejecutar nada todavía. Sé concreto: mencioná qué tools usarías en cada paso.",
+      },
+      {
+        role: "user",
+        content: userMessage,
+      },
+    ],
+  });
+  return response.choices[0].message.content;
+}
+
+// ============================================================
 // LOOP DE CONVERSACIÓN
 // ============================================================
 
@@ -207,20 +229,21 @@ const messages = [
 ];
 
 async function main() {
-  console.log(`Coding Agent listo. Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
-  console.log("Escribí 'exit' para salir | 'supervision on/off' para cambiarla.\n");
+  console.log(`Coding Agent listo.`);
+  console.log(`  Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
+  console.log(`  Plan mode:   ${PLAN_MODE ? "✅ activado" : "❌ desactivado"}`);
+  console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | 'exit'\n`);
 
   // Loop externo
   while (true) {
     const input = await ask("> ");
 
+    // Comandos de control
     if (input.toLowerCase() === "exit") {
       console.log("Saliendo...");
       rl.close();
       break;
     }
-
-    // Comando para activar/desactivar supervisión en caliente
     if (input.toLowerCase() === "supervision on") {
       SUPERVISION = true;
       console.log("✅ Supervisión activada\n");
@@ -231,10 +254,46 @@ async function main() {
       console.log("❌ Supervisión desactivada\n");
       continue;
     }
+    if (input.toLowerCase() === "plan on") {
+      PLAN_MODE = true;
+      console.log("✅ Plan mode activado\n");
+      continue;
+    }
+    if (input.toLowerCase() === "plan off") {
+      PLAN_MODE = false;
+      console.log("❌ Plan mode desactivado\n");
+      continue;
+    }
 
-    messages.push({ role: "user", content: input });
+    // ── PLAN MODE ────────────────────────────────────────────
+    if (PLAN_MODE) {
+      console.log("\n📋 Generando plan...\n");
+      const plan = await getPlan(input);
+      console.log(plan);
 
-    // Loop interno
+      const answer = await ask("\n¿Aprobás el plan? (s = ejecutar / n = cancelar / m = modificar): ");
+
+      if (answer.toLowerCase() === "n") {
+        console.log("🚫 Tarea cancelada.\n");
+        continue;
+      }
+
+      if (answer.toLowerCase() === "m") {
+        const modification = await ask("Escribí tu modificación: ");
+        messages.push({
+          role: "user",
+          content: `${input}\n\nPlan sugerido:\n${plan}\n\nModificación del usuario: ${modification}`,
+        });
+      } else {
+        // aprobado — agregar mensaje original
+        messages.push({ role: "user", content: input });
+      }
+    } else {
+      messages.push({ role: "user", content: input });
+    }
+    // ─────────────────────────────────────────────────────────
+
+    // Loop interno — ejecuta tools hasta que el LLM responde sin pedir ninguna
     while (true) {
       const response = await client.chat.completions.create({
         model: MODEL,

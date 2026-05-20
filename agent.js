@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import readline from "readline";
 import fs from "fs";
 import { execSync } from "child_process";
-import { dirname } from "path";  // fix: reemplaza require("path")
+import { dirname } from "path";
 dotenv.config();
 
 const client = new OpenAI({
@@ -12,6 +12,14 @@ const client = new OpenAI({
 });
 
 const MODEL = "models/gemini-2.5-flash";
+
+// ============================================================
+// SUPERVISIÓN — activar/desactivar acá
+// ============================================================
+let SUPERVISION = true; // true = pide confirmación | false = ejecuta directo
+
+// Tools que requieren confirmación cuando SUPERVISION está activo
+const SUPERVISED_TOOLS = ["write_file", "run_command"];
 
 // ============================================================
 // TOOLS — implementación
@@ -30,7 +38,7 @@ function read_file(path) {
 
 function write_file({ path, content }) {
   try {
-    fs.mkdirSync(dirname(path), { recursive: true }); // fix: usar dirname importado
+    fs.mkdirSync(dirname(path), { recursive: true });
     fs.writeFileSync(path, content, "utf-8");
     console.log(`✅ write_file("${path}")`);
     return `Archivo escrito exitosamente: ${path}`;
@@ -79,25 +87,20 @@ async function web_search({ query }) {
       }),
     });
     const data = await res.json();
-
-    // fix: manejar el caso donde data.results es undefined
     if (!data.results) {
-      console.log(`❌ web_search: respuesta inesperada de Tavily:`, data);
       return `Error: Tavily no devolvió resultados. Detalle: ${JSON.stringify(data)}`;
     }
-
     const results = data.results
       .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.content}`)
       .join("\n\n");
     return results || "Sin resultados";
   } catch (err) {
-    console.log(`❌ web_search error: ${err.message}`);
     return `Error en web_search: ${err.message}`;
   }
 }
 
 // ============================================================
-// SCHEMAS — definición de tools para el LLM
+// SCHEMAS
 // ============================================================
 
 const tools = [
@@ -174,7 +177,6 @@ const tools = [
   },
 ];
 
-// Mapa nombre → función
 const toolFunctions = {
   read_file: (args) => read_file(args.path),
   write_file,
@@ -205,9 +207,10 @@ const messages = [
 ];
 
 async function main() {
-  console.log("Coding Agent listo. Escribí 'exit' para salir.\n");
+  console.log(`Coding Agent listo. Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
+  console.log("Escribí 'exit' para salir | 'supervision on/off' para cambiarla.\n");
 
-  // Loop externo — mantiene la conversación viva
+  // Loop externo
   while (true) {
     const input = await ask("> ");
 
@@ -217,9 +220,21 @@ async function main() {
       break;
     }
 
+    // Comando para activar/desactivar supervisión en caliente
+    if (input.toLowerCase() === "supervision on") {
+      SUPERVISION = true;
+      console.log("✅ Supervisión activada\n");
+      continue;
+    }
+    if (input.toLowerCase() === "supervision off") {
+      SUPERVISION = false;
+      console.log("❌ Supervisión desactivada\n");
+      continue;
+    }
+
     messages.push({ role: "user", content: input });
 
-    // Loop interno — ejecuta tools hasta que el LLM responde sin pedir ninguna
+    // Loop interno
     while (true) {
       const response = await client.chat.completions.create({
         model: MODEL,
@@ -238,6 +253,21 @@ async function main() {
           const args = JSON.parse(toolCall.function.arguments);
 
           console.log(`\n🔧 ${toolName}(${JSON.stringify(args)})`);
+
+          // ── SUPERVISIÓN ──────────────────────────────────────
+          if (SUPERVISION && SUPERVISED_TOOLS.includes(toolName)) {
+            const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (s/n): `);
+            if (confirm.toLowerCase() !== "s") {
+              console.log("🚫 Acción rechazada por el usuario\n");
+              messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: `El usuario rechazó ejecutar ${toolName}. No realices esta acción.`,
+              });
+              continue;
+            }
+          }
+          // ─────────────────────────────────────────────────────
 
           const toolFn = toolFunctions[toolName];
           const result = toolFn

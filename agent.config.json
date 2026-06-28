@@ -1,0 +1,20 @@
+{
+  "project": {
+    "name": "Rival Match",
+    "ecosystem": "NestJS + TypeScript",
+    "description": "Proyecto objetivo definido para el TP final del coding agent avanzado."
+  },
+  "workspace": ".",
+  "permissions": {
+    "read": {
+      "deny": [".env", ".env.*", "**/*.pem", "secrets/**", "node_modules/**"]
+    },
+    "write": {
+      "deny": [".env", ".env.*", "**/*.pem", "secrets/**", ".github/**", "package-lock.json", "node_modules/**"]
+    },
+    "commands": {
+      "deny": ["rm -rf", "git push", "sudo", "chmod 777"],
+      "require_approval": ["npm install", "pnpm install", "yarn install", "pip install", "git commit"]
+    }
+  }
+}

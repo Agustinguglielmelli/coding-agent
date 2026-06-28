@@ -1,6 +1,7 @@
 {
   "type": "module",
   "scripts": {
+    "rag:build": "node scripts/build-rag.js",
     "test": "node test.js"
   },
   "dependencies": {

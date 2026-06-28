@@ -1,2 +1,4 @@
 .idea/
 node_modules
+rag/vector-store.json
+.env

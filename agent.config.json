@@ -10,6 +10,14 @@
     "max_session_summaries": 20,
     "max_items_per_section": 50
   },
+  "rag": {
+    "sources_dir": "rag/sources",
+    "vector_store": "rag/vector-store.json",
+    "chunk_size": 900,
+    "chunk_overlap": 150,
+    "embedding_dimensions": 128,
+    "top_k": 4
+  },
   "permissions": {
     "read": {
       "deny": [".env", ".env.*", "**/*.pem", "secrets/**", "node_modules/**"]

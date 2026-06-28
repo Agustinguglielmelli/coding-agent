@@ -4,6 +4,7 @@ import readline from "readline";
 import fs from "fs";
 import { execSync } from "child_process";
 import { basename, dirname } from "path";
+import { searchRag } from "./src/rag.js";
 dotenv.config();
 
 const client = new OpenAI({
@@ -369,6 +370,33 @@ async function web_search({ query }) {
   }
 }
 
+function search_rag({ query, top_k }) {
+  try {
+    const results = searchRag(query, agentConfig, { topK: top_k });
+    console.log(`✅ search_rag("${query}") — ${results.length} resultados`);
+
+    if (results.length === 0) {
+      return "RAG no encontro fragmentos relevantes. Usar web_search solo si falta evidencia.";
+    }
+
+    return results
+      .map((result, index) => {
+        const score = result.score.toFixed(3);
+        return [
+          `${index + 1}. ${result.metadata.title}`,
+          `   score: ${score}`,
+          `   fuente: ${result.metadata.source}`,
+          `   archivo: ${result.metadata.file}`,
+          `   chunk: ${result.metadata.chunk}`,
+          `   contenido: ${result.text}`,
+        ].join("\n");
+      })
+      .join("\n\n");
+  } catch (err) {
+    return `Error en search_rag: ${err.message}`;
+  }
+}
+
 // ============================================================
 // SCHEMAS
 // ============================================================
@@ -448,6 +476,28 @@ const tools = [
   {
     type: "function",
     function: {
+      name: "search_rag",
+      description:
+        "Busca primero en la base RAG local de NestJS, TypeScript y notas del proyecto. Devuelve fragmentos recuperados con fuente, archivo, chunk y score.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Consulta tecnica para recuperar contexto relevante.",
+          },
+          top_k: {
+            type: "number",
+            description: "Cantidad maxima de fragmentos a recuperar.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "read_project_memory",
       description:
         "Lee la memoria persistente del proyecto actual: arquitectura, decisiones, bugs, comandos, convenciones y resúmenes previos.",
@@ -513,6 +563,7 @@ const toolFunctions = {
   run_command,
   list_files,
   web_search,
+  search_rag,
   read_project_memory,
   update_project_memory,
 };
@@ -564,7 +615,7 @@ const messages = [
   {
     role: "system",
     content:
-      "Sos un agente de código especializado en el proyecto configurado. Podés leer y escribir archivos, ejecutar comandos, listar directorios, buscar en la web y usar memoria persistente del proyecto. Antes de trabajar sobre una tarea del proyecto, consultá read_project_memory. Cuando detectes arquitectura, comandos útiles, decisiones, convenciones, bugs o un resumen importante de sesión, guardalo con update_project_memory indicando si la fuente fue repo, usuario, RAG, web, inferencia o agente.",
+      "Sos un agente de código especializado en el proyecto configurado. Podés leer y escribir archivos, ejecutar comandos, listar directorios, consultar RAG, buscar en la web y usar memoria persistente del proyecto. Antes de trabajar sobre una tarea del proyecto, consultá read_project_memory. Para dudas tecnicas de NestJS, TypeScript o patrones del proyecto, consultá primero search_rag y mostra que fuentes usaste. Usá web_search solo como fallback cuando el RAG no tenga evidencia suficiente. Cuando detectes arquitectura, comandos útiles, decisiones, convenciones, bugs o un resumen importante de sesión, guardalo con update_project_memory indicando si la fuente fue repo, usuario, RAG, web, inferencia o agente.",
   },
 ];
 

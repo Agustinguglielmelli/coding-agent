@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import readline from "readline";
 import fs from "fs";
 import { execSync } from "child_process";
-import { dirname } from "path";
+import { basename, dirname } from "path";
 dotenv.config();
 
 const client = new OpenAI({
@@ -12,6 +12,26 @@ const client = new OpenAI({
 });
 
 const MODEL = "models/gemini-2.5-flash";
+const CONFIG_PATH = "./agent.config.json";
+
+function loadAgentConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  } catch (err) {
+    console.log(`⚠️  No se pudo leer ${CONFIG_PATH}: ${err.message}`);
+    return {
+      project: { name: "Proyecto sin nombre", ecosystem: "No definido" },
+      workspace: ".",
+      memory: { project_file: "memory/projects/default.json" },
+    };
+  }
+}
+
+const agentConfig = loadAgentConfig();
+const PROJECT_MEMORY_PATH =
+  agentConfig.memory?.project_file || "memory/projects/default.json";
+const MAX_SESSION_SUMMARIES = agentConfig.memory?.max_session_summaries || 20;
+const MAX_ITEMS_PER_SECTION = agentConfig.memory?.max_items_per_section || 50;
 
 // ============================================================
 // FLAGS — activar/desactivar acá
@@ -20,6 +40,256 @@ let SUPERVISION = true;  // pide confirmación antes de write_file y run_command
 let PLAN_MODE = true;    // genera un plan antes de ejecutar cualquier tool
 
 const SUPERVISED_TOOLS = ["write_file", "run_command"];
+const PLAN_MODE_DISABLED_TOOLS = ["write_file"];
+
+// ============================================================
+// POLITICAS DESDE agent.config.json
+// ============================================================
+
+function normalizePathForPolicy(path) {
+  return String(path).replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function globToRegExp(pattern) {
+  const normalizedPattern = normalizePathForPolicy(pattern);
+  let regex = "";
+
+  for (let i = 0; i < normalizedPattern.length; i += 1) {
+    const char = normalizedPattern[i];
+    const nextChar = normalizedPattern[i + 1];
+
+    if (char === "*" && nextChar === "*") {
+      regex += ".*";
+      i += 1;
+      continue;
+    }
+
+    if (char === "*") {
+      regex += "[^/]*";
+      continue;
+    }
+
+    if ("\\^$+?.()|{}[]".includes(char)) {
+      regex += `\\${char}`;
+      continue;
+    }
+
+    regex += char;
+  }
+
+  return new RegExp(`^${regex}$`);
+}
+
+function matchesPolicyPattern(pattern, value) {
+  const normalizedValue = normalizePathForPolicy(value);
+  const normalizedPattern = normalizePathForPolicy(pattern);
+  const regex = globToRegExp(normalizedPattern);
+
+  if (regex.test(normalizedValue)) return true;
+  if (!normalizedPattern.includes("/")) return regex.test(basename(normalizedValue));
+  return false;
+}
+
+function isPathDenied(path, action) {
+  const denyPatterns = agentConfig.permissions?.[action]?.deny || [];
+  return denyPatterns.find((pattern) => matchesPolicyPattern(pattern, path));
+}
+
+function isCommandDenied(command) {
+  const denyPatterns = agentConfig.permissions?.commands?.deny || [];
+  return denyPatterns.find((pattern) => command.includes(pattern));
+}
+
+function commandRequiresApproval(command) {
+  const approvalPatterns = agentConfig.permissions?.commands?.require_approval || [];
+  return approvalPatterns.find((pattern) => command.includes(pattern));
+}
+
+function validateToolCall(toolName, args) {
+  if (toolName === "read_file") {
+    const deniedBy = isPathDenied(args.path, "read");
+    if (deniedBy) {
+      return {
+        allowed: false,
+        reason: `Politica de lectura bloqueo "${args.path}" por patron "${deniedBy}".`,
+      };
+    }
+  }
+
+  if (toolName === "list_files") {
+    const deniedBy = isPathDenied(args.directory, "read");
+    if (deniedBy) {
+      return {
+        allowed: false,
+        reason: `Politica de lectura bloqueo "${args.directory}" por patron "${deniedBy}".`,
+      };
+    }
+  }
+
+  if (toolName === "write_file") {
+    const deniedBy = isPathDenied(args.path, "write");
+    if (deniedBy) {
+      return {
+        allowed: false,
+        reason: `Politica de escritura bloqueo "${args.path}" por patron "${deniedBy}".`,
+      };
+    }
+  }
+
+  if (toolName === "run_command") {
+    const deniedBy = isCommandDenied(args.command);
+    if (deniedBy) {
+      return {
+        allowed: false,
+        reason: `Politica de comandos bloqueo "${args.command}" por patron "${deniedBy}".`,
+      };
+    }
+  }
+
+  return { allowed: true };
+}
+
+// ============================================================
+// MEMORIA PERSISTENTE POR PROYECTO
+// ============================================================
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function createDefaultProjectMemory() {
+  return {
+    schemaVersion: 1,
+    project: agentConfig.project || {},
+    workspace: agentConfig.workspace || ".",
+    architecture: {
+      summary: "",
+      detectedAt: null,
+      stack: [],
+      importantFiles: [],
+      modules: [],
+    },
+    dependencies: [],
+    commands: [],
+    conventions: [],
+    decisions: [],
+    bugs: [],
+    sessionSummaries: [],
+    usefulFindings: [],
+    updatedAt: nowIso(),
+  };
+}
+
+function ensureProjectMemory() {
+  try {
+    if (!fs.existsSync(PROJECT_MEMORY_PATH)) {
+      fs.mkdirSync(dirname(PROJECT_MEMORY_PATH), { recursive: true });
+      fs.writeFileSync(
+        PROJECT_MEMORY_PATH,
+        JSON.stringify(createDefaultProjectMemory(), null, 2),
+        "utf-8"
+      );
+    }
+
+    return JSON.parse(fs.readFileSync(PROJECT_MEMORY_PATH, "utf-8"));
+  } catch (err) {
+    return {
+      ...createDefaultProjectMemory(),
+      usefulFindings: [
+        {
+          title: "Error leyendo memoria persistente",
+          content: err.message,
+          source: "agent",
+          tags: ["memory-error"],
+          createdAt: nowIso(),
+        },
+      ],
+    };
+  }
+}
+
+function saveProjectMemory(memory) {
+  memory.updatedAt = nowIso();
+  fs.mkdirSync(dirname(PROJECT_MEMORY_PATH), { recursive: true });
+  fs.writeFileSync(PROJECT_MEMORY_PATH, JSON.stringify(memory, null, 2), "utf-8");
+}
+
+function normalizeTags(tags) {
+  if (!tags) return [];
+  if (Array.isArray(tags)) return tags.map(String);
+  return [String(tags)];
+}
+
+function trimMemoryList(items, maxItems = MAX_ITEMS_PER_SECTION) {
+  return items.slice(Math.max(items.length - maxItems, 0));
+}
+
+function buildMemoryEntry({ title, content, source, tags, metadata }) {
+  return {
+    title: title || "Entrada sin titulo",
+    content,
+    source: source || "agent",
+    tags: normalizeTags(tags),
+    metadata: metadata || {},
+    createdAt: nowIso(),
+  };
+}
+
+function read_project_memory() {
+  const memory = ensureProjectMemory();
+  console.log(`✅ read_project_memory("${PROJECT_MEMORY_PATH}")`);
+  return JSON.stringify(memory, null, 2);
+}
+
+function update_project_memory(args) {
+  const { section, title, content, source, tags, metadata } = args;
+  const memory = ensureProjectMemory();
+  const entry = buildMemoryEntry({ title, content, source, tags, metadata });
+
+  switch (section) {
+    case "architecture":
+      memory.architecture.summary = content;
+      memory.architecture.detectedAt = nowIso();
+      if (metadata?.stack) memory.architecture.stack = metadata.stack;
+      if (metadata?.importantFiles) memory.architecture.importantFiles = metadata.importantFiles;
+      if (metadata?.modules) memory.architecture.modules = metadata.modules;
+      break;
+    case "dependency":
+      memory.dependencies.push(entry);
+      memory.dependencies = trimMemoryList(memory.dependencies);
+      break;
+    case "command":
+      memory.commands.push(entry);
+      memory.commands = trimMemoryList(memory.commands);
+      break;
+    case "convention":
+      memory.conventions.push(entry);
+      memory.conventions = trimMemoryList(memory.conventions);
+      break;
+    case "decision":
+      memory.decisions.push(entry);
+      memory.decisions = trimMemoryList(memory.decisions);
+      break;
+    case "bug":
+      memory.bugs.push(entry);
+      memory.bugs = trimMemoryList(memory.bugs);
+      break;
+    case "session_summary":
+      memory.sessionSummaries.push(entry);
+      memory.sessionSummaries = trimMemoryList(memory.sessionSummaries, MAX_SESSION_SUMMARIES);
+      break;
+    case "useful_finding":
+      memory.usefulFindings.push(entry);
+      memory.usefulFindings = trimMemoryList(memory.usefulFindings);
+      break;
+    default:
+      return `Error: sección de memoria inválida: ${section}`;
+  }
+
+  saveProjectMemory(memory);
+  console.log(`✅ update_project_memory("${section}")`);
+  return `Memoria actualizada en ${PROJECT_MEMORY_PATH}: ${section}`;
+}
 
 // ============================================================
 // TOOLS — implementación
@@ -175,6 +445,66 @@ const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "read_project_memory",
+      description:
+        "Lee la memoria persistente del proyecto actual: arquitectura, decisiones, bugs, comandos, convenciones y resúmenes previos.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_project_memory",
+      description:
+        "Guarda una observación persistente del proyecto para futuras sesiones del agente.",
+      parameters: {
+        type: "object",
+        properties: {
+          section: {
+            type: "string",
+            enum: [
+              "architecture",
+              "dependency",
+              "command",
+              "convention",
+              "decision",
+              "bug",
+              "session_summary",
+              "useful_finding",
+            ],
+            description: "Sección de memoria donde guardar la información.",
+          },
+          title: { type: "string", description: "Título breve de la entrada." },
+          content: {
+            type: "string",
+            description: "Contenido concreto que debe persistir.",
+          },
+          source: {
+            type: "string",
+            description:
+              "Origen de la información: repo, usuario, RAG, web, inferencia o agente.",
+          },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Etiquetas para recuperar esta entrada luego.",
+          },
+          metadata: {
+            type: "object",
+            description:
+              "Datos estructurados opcionales. Para architecture puede incluir stack, importantFiles y modules.",
+          },
+        },
+        required: ["section", "content"],
+      },
+    },
+  },
 ];
 
 const toolFunctions = {
@@ -183,7 +513,17 @@ const toolFunctions = {
   run_command,
   list_files,
   web_search,
+  read_project_memory,
+  update_project_memory,
 };
+
+function getToolsForCurrentMode() {
+  if (!PLAN_MODE) return tools;
+
+  return tools.filter(
+    (tool) => !PLAN_MODE_DISABLED_TOOLS.includes(tool.function.name)
+  );
+}
 
 // ============================================================
 // PLAN MODE — pedir plan al LLM antes de ejecutar
@@ -224,14 +564,20 @@ const messages = [
   {
     role: "system",
     content:
-      "Sos un agente de código. Podés leer y escribir archivos, ejecutar comandos, listar directorios y buscar en la web. Usá las tools que necesites para completar las tareas.",
+      "Sos un agente de código especializado en el proyecto configurado. Podés leer y escribir archivos, ejecutar comandos, listar directorios, buscar en la web y usar memoria persistente del proyecto. Antes de trabajar sobre una tarea del proyecto, consultá read_project_memory. Cuando detectes arquitectura, comandos útiles, decisiones, convenciones, bugs o un resumen importante de sesión, guardalo con update_project_memory indicando si la fuente fue repo, usuario, RAG, web, inferencia o agente.",
   },
 ];
 
 async function main() {
+  ensureProjectMemory();
   console.log(`Coding Agent listo.`);
+  console.log(`  Proyecto:     ${agentConfig.project?.name || "sin nombre"}`);
+  console.log(`  Memoria:      ${PROJECT_MEMORY_PATH}`);
   console.log(`  Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
   console.log(`  Plan mode:   ${PLAN_MODE ? "✅ activado" : "❌ desactivado"}`);
+  if (PLAN_MODE) {
+    console.log(`  Tools off:    ${PLAN_MODE_DISABLED_TOOLS.join(", ")}`);
+  }
   console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | 'exit'\n`);
 
   // Loop externo
@@ -257,6 +603,7 @@ async function main() {
     if (input.toLowerCase() === "plan on") {
       PLAN_MODE = true;
       console.log("✅ Plan mode activado\n");
+      console.log(`Tools deshabilitadas en plan mode: ${PLAN_MODE_DISABLED_TOOLS.join(", ")}\n`);
       continue;
     }
     if (input.toLowerCase() === "plan off") {
@@ -298,7 +645,7 @@ async function main() {
       const response = await client.chat.completions.create({
         model: MODEL,
         messages,
-        tools,
+        tools: getToolsForCurrentMode(),
         tool_choice: "auto",
       });
 
@@ -313,9 +660,28 @@ async function main() {
 
           console.log(`\n🔧 ${toolName}(${JSON.stringify(args)})`);
 
+          const policyResult = validateToolCall(toolName, args);
+          if (!policyResult.allowed) {
+            console.log(`🚫 ${policyResult.reason}\n`);
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: policyResult.reason,
+            });
+            continue;
+          }
+
           // ── SUPERVISIÓN ──────────────────────────────────────
-          if (SUPERVISION && SUPERVISED_TOOLS.includes(toolName)) {
-            const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (s/n): `);
+          const approvalPattern =
+            toolName === "run_command" ? commandRequiresApproval(args.command) : null;
+          const needsSupervision = SUPERVISION && SUPERVISED_TOOLS.includes(toolName);
+          const needsPolicyApproval = Boolean(approvalPattern);
+
+          if (needsSupervision || needsPolicyApproval) {
+            const reason = needsPolicyApproval
+              ? `requiere aprobación por política "${approvalPattern}"`
+              : "requiere aprobación por supervisión";
+            const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (${reason}) (s/n): `);
             if (confirm.toLowerCase() !== "s") {
               console.log("🚫 Acción rechazada por el usuario\n");
               messages.push({

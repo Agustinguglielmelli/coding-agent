@@ -5,6 +5,11 @@
     "description": "Proyecto objetivo definido para el TP final del coding agent avanzado."
   },
   "workspace": ".",
+  "memory": {
+    "project_file": "memory/projects/rival-match.json",
+    "max_session_summaries": 20,
+    "max_items_per_section": 50
+  },
   "permissions": {
     "read": {
       "deny": [".env", ".env.*", "**/*.pem", "secrets/**", "node_modules/**"]

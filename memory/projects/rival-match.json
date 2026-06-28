@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "Rival Match",
+    "ecosystem": "NestJS + TypeScript",
+    "description": "Proyecto objetivo definido para el TP final del coding agent avanzado."
+  },
+  "workspace": ".",
+  "architecture": {
+    "summary": "",
+    "detectedAt": null,
+    "stack": [],
+    "importantFiles": [],
+    "modules": []
+  },
+  "dependencies": [],
+  "commands": [],
+  "conventions": [],
+  "decisions": [],
+  "bugs": [],
+  "sessionSummaries": [],
+  "usefulFindings": [],
+  "updatedAt": "2026-06-28T00:00:00.000Z"
+}

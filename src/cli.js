@@ -5,11 +5,13 @@ import { client, MODEL } from "./llmClient.js";
 import { agentConfig, PROJECT_MEMORY_PATH } from "./config.js";
 import { ensureProjectMemory } from "./memory.js";
 import { tools, toolFunctions } from "./tools/index.js";
+import { runTask } from "./orchestrator.js";
 
 // ============================================================
 // FLAGS — activar/desactivar acá
 // ============================================================
 let PLAN_MODE = true; // genera un plan antes de ejecutar cualquier tool
+let MULTI_AGENT_MODE = false; // si está activo, cada input pasa por el orquestador (5 subagentes)
 
 const PLAN_MODE_DISABLED_TOOLS = ["write_file"];
 
@@ -65,7 +67,8 @@ export async function main() {
   if (PLAN_MODE) {
     console.log(`  Tools off:    ${PLAN_MODE_DISABLED_TOOLS.join(", ")}`);
   }
-  console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | 'exit'\n`);
+  console.log(`  Multiagente: ${MULTI_AGENT_MODE ? "✅ activado (Explorer→Researcher→Implementer→Tester→Reviewer)" : "❌ desactivado (un solo agente)"}`);
+  console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | 'multiagente on/off' | 'exit'\n`);
 
   // Loop externo
   while (true) {
@@ -98,6 +101,28 @@ export async function main() {
       console.log("❌ Plan mode desactivado\n");
       continue;
     }
+    if (input.toLowerCase() === "multiagente on") {
+      MULTI_AGENT_MODE = true;
+      console.log("✅ Modo multiagente activado — cada tarea corre Explorer→Researcher→Implementer→Tester→Reviewer\n");
+      continue;
+    }
+    if (input.toLowerCase() === "multiagente off") {
+      MULTI_AGENT_MODE = false;
+      console.log("❌ Modo multiagente desactivado — volvés al agente único\n");
+      continue;
+    }
+
+    // ── MODO MULTIAGENTE ─────────────────────────────────────
+    // El orquestador maneja su propio taskState por tarea; no se mezcla
+    // con el historial `messages` del agente único, y plan mode no aplica
+    // acá (la supervisión de write_file/run_command sigue funcionando
+    // igual dentro de cada subagente).
+    if (MULTI_AGENT_MODE) {
+      const { summary } = await runTask(input);
+      console.log("\n" + summary + "\n");
+      continue;
+    }
+    // ─────────────────────────────────────────────────────────
 
     // ── PLAN MODE ────────────────────────────────────────────
     if (PLAN_MODE) {

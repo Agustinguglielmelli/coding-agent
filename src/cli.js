@@ -1,17 +1,16 @@
-import readline from "readline";
+import { ask, closeIO } from "./io.js";
+import { runAgentLoop } from "./agentLoop.js";
+import { settings } from "./settings.js";
 import { client, MODEL } from "./llmClient.js";
 import { agentConfig, PROJECT_MEMORY_PATH } from "./config.js";
-import { validateToolCall, commandRequiresApproval } from "./policies.js";
 import { ensureProjectMemory } from "./memory.js";
 import { tools, toolFunctions } from "./tools/index.js";
 
 // ============================================================
 // FLAGS — activar/desactivar acá
 // ============================================================
-let SUPERVISION = true; // pide confirmación antes de write_file y run_command
 let PLAN_MODE = true; // genera un plan antes de ejecutar cualquier tool
 
-const SUPERVISED_TOOLS = ["write_file", "run_command"];
 const PLAN_MODE_DISABLED_TOOLS = ["write_file"];
 
 function getToolsForCurrentMode() {
@@ -45,19 +44,10 @@ async function getPlan(userMessage) {
 }
 
 // ============================================================
-// LOOP DE CONVERSACIÓN
+// LOOP DE CONVERSACIÓN — agente principal, un solo agente
 // ============================================================
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-
-function ask(question) {
-  return new Promise((resolve) => rl.question(question, resolve));
-}
-
-const messages = [
+let messages = [
   {
     role: "system",
     content:
@@ -70,7 +60,7 @@ export async function main() {
   console.log(`Coding Agent listo.`);
   console.log(`  Proyecto:     ${agentConfig.project?.name || "sin nombre"}`);
   console.log(`  Memoria:      ${PROJECT_MEMORY_PATH}`);
-  console.log(`  Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
+  console.log(`  Supervisión: ${settings.supervision ? "✅ activada" : "❌ desactivada"}`);
   console.log(`  Plan mode:   ${PLAN_MODE ? "✅ activado" : "❌ desactivado"}`);
   if (PLAN_MODE) {
     console.log(`  Tools off:    ${PLAN_MODE_DISABLED_TOOLS.join(", ")}`);
@@ -84,16 +74,16 @@ export async function main() {
     // Comandos de control
     if (input.toLowerCase() === "exit") {
       console.log("Saliendo...");
-      rl.close();
+      closeIO();
       break;
     }
     if (input.toLowerCase() === "supervision on") {
-      SUPERVISION = true;
+      settings.supervision = true;
       console.log("✅ Supervisión activada\n");
       continue;
     }
     if (input.toLowerCase() === "supervision off") {
-      SUPERVISION = false;
+      settings.supervision = false;
       console.log("❌ Supervisión desactivada\n");
       continue;
     }
@@ -137,76 +127,17 @@ export async function main() {
     }
     // ─────────────────────────────────────────────────────────
 
-    // Loop interno — ejecuta tools hasta que el LLM responde sin pedir ninguna
-    while (true) {
-      const response = await client.chat.completions.create({
-        model: MODEL,
-        messages,
-        tools: getToolsForCurrentMode(),
-        tool_choice: "auto",
-      });
+    // El historial ya trae el system message desde el arranque, así que
+    // acá no hace falta pasar systemPrompt: runAgentLoop lo detecta y no
+    // lo duplica.
+    const { messages: updatedMessages, finalText } = await runAgentLoop({
+      systemPrompt: null,
+      tools: getToolsForCurrentMode(),
+      toolFunctions,
+      messages,
+    });
 
-      const message = response.choices[0].message;
-
-      if (message.tool_calls) {
-        messages.push(message);
-
-        for (const toolCall of message.tool_calls) {
-          const toolName = toolCall.function.name;
-          const args = JSON.parse(toolCall.function.arguments);
-
-          console.log(`\n🔧 ${toolName}(${JSON.stringify(args)})`);
-
-          const policyResult = validateToolCall(toolName, args);
-          if (!policyResult.allowed) {
-            console.log(`🚫 ${policyResult.reason}\n`);
-            messages.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: policyResult.reason,
-            });
-            continue;
-          }
-
-          // ── SUPERVISIÓN ──────────────────────────────────────
-          const approvalPattern =
-            toolName === "run_command" ? commandRequiresApproval(args.command) : null;
-          const needsSupervision = SUPERVISION && SUPERVISED_TOOLS.includes(toolName);
-          const needsPolicyApproval = Boolean(approvalPattern);
-
-          if (needsSupervision || needsPolicyApproval) {
-            const reason = needsPolicyApproval
-              ? `requiere aprobación por política "${approvalPattern}"`
-              : "requiere aprobación por supervisión";
-            const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (${reason}) (s/n): `);
-            if (confirm.toLowerCase() !== "s") {
-              console.log("🚫 Acción rechazada por el usuario\n");
-              messages.push({
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: `El usuario rechazó ejecutar ${toolName}. No realices esta acción.`,
-              });
-              continue;
-            }
-          }
-          // ─────────────────────────────────────────────────────
-
-          const toolFn = toolFunctions[toolName];
-          const result = toolFn
-            ? await toolFn(args)
-            : `Error: tool "${toolName}" no existe`;
-
-          messages.push({
-            role: "tool",
-            tool_call_id: toolCall.id,
-            content: String(result),
-          });
-        }
-      } else {
-        messages.push(message);
-        console.log("\n" + message.content + "\n");
-        break;
-      }
-    }
+    messages = updatedMessages;
+    console.log("\n" + finalText + "\n");
   }
 }

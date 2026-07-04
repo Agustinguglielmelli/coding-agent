@@ -14,110 +14,114 @@ export function denyToolCall(reason) {
   return { allowed: false, reason };
 }
 
-export function createToolDefinition({
-  schema,
-  execute,
-  matches,
-  validate,
-  requiresApproval,
-  audit,
-  supervised = false,
-  disabledInPlanMode = false,
-}) {
-  return {
-    name: schema.name,
-    schema,
-    supervised,
-    disabledInPlanMode,
-    matches: matches || ((toolCall) => toolCall.name === schema.name),
-    validate: validate || (() => allowToolCall()),
-    requiresApproval: requiresApproval || (() => null),
-    execute,
-    audit,
-    toOpenAITool() {
-      return {
-        type: "function",
-        function: this.schema,
-      };
-    },
-  };
+export class Tool {
+  constructor({
+    name,
+    description,
+    parameters,
+    supervised = false,
+    disabledInPlanMode = false,
+  }) {
+    if (new.target === Tool) {
+      throw new Error("Tool is an interface base class and cannot be instantiated directly.");
+    }
+
+    this.name = name;
+    this.schema = {
+      name,
+      description,
+      parameters,
+    };
+    this.supervised = supervised;
+    this.disabledInPlanMode = disabledInPlanMode;
+  }
+
+  matches(toolCall) {
+    return toolCall.name === this.name;
+  }
+
+  validate() {
+    return allowToolCall();
+  }
+
+  requiresApproval() {
+    return null;
+  }
+
+  async execute() {
+    throw new Error(`Tool "${this.name}" must implement execute(toolCall).`);
+  }
+
+  audit() {
+    return {};
+  }
+
+  toOpenAITool() {
+    return {
+      type: "function",
+      function: this.schema,
+    };
+  }
 }
 
-export function createToolRegistry(toolDefinitions) {
-  const openAiTools = toolDefinitions.map((toolDefinition) =>
-    toolDefinition.toOpenAITool()
-  );
-
-  function find(toolCall) {
-    return toolDefinitions.find((toolDefinition) => toolDefinition.matches(toolCall));
+export class ToolRegistry {
+  constructor(tools) {
+    this.tools = tools;
+    this.openAiTools = tools.map((tool) => tool.toOpenAITool());
   }
 
-  function getOpenAiTools() {
-    return openAiTools;
+  find(toolCall) {
+    return this.tools.find((tool) => tool.matches(toolCall));
   }
 
-  function getOpenAiToolsByName(toolNames) {
-    return openAiTools.filter((tool) => toolNames.includes(tool.function.name));
+  get definitions() {
+    return this.tools;
   }
 
-  function getPlanModeDisabledToolNames() {
-    return toolDefinitions
-      .filter((toolDefinition) => toolDefinition.disabledInPlanMode)
-      .map((toolDefinition) => toolDefinition.name);
+  getOpenAiTools() {
+    return this.openAiTools;
   }
 
-  function getOpenAiToolsForMode({ planMode }) {
-    if (!planMode) return openAiTools;
-    return toolDefinitions
-      .filter((toolDefinition) => !toolDefinition.disabledInPlanMode)
-      .map((toolDefinition) => toolDefinition.toOpenAITool());
+  getOpenAiToolsByName(toolNames) {
+    return this.openAiTools.filter((tool) => toolNames.includes(tool.function.name));
   }
 
-  return {
-    definitions: toolDefinitions,
-    find,
-    getOpenAiTools,
-    getOpenAiToolsByName,
-    getPlanModeDisabledToolNames,
-    getOpenAiToolsForMode,
-  };
+  getPlanModeDisabledToolNames() {
+    return this.tools
+      .filter((tool) => tool.disabledInPlanMode)
+      .map((tool) => tool.name);
+  }
+
+  getOpenAiToolsForMode({ planMode }) {
+    if (!planMode) return this.openAiTools;
+    return this.tools
+      .filter((tool) => !tool.disabledInPlanMode)
+      .map((tool) => tool.toOpenAITool());
+  }
+}
+
+export function createToolRegistry(tools) {
+  return new ToolRegistry(tools);
 }
 
 export function validateToolRegistry({ toolRegistry, subagentDefinitions }) {
-  const toolSchemaNames = toolRegistry.definitions.map(
-    (toolDefinition) => toolDefinition.schema.name
-  );
-  const toolSchemaNameSet = new Set(toolSchemaNames);
+  const toolNames = toolRegistry.definitions.map((tool) => tool.name);
+  const toolNameSet = new Set(toolNames);
   const errors = [];
 
-  for (const toolDefinition of toolRegistry.definitions) {
-    if (!toolDefinition.name || !toolDefinition.schema?.name) {
+  for (const tool of toolRegistry.definitions) {
+    if (!(tool instanceof Tool)) {
+      errors.push(`"${tool?.name || "tool sin nombre"}" no extiende Tool.`);
+      continue;
+    }
+    if (!tool.name || !tool.schema?.name) {
       errors.push("Hay una tool sin nombre o sin schema.name.");
     }
-    if (
-      toolDefinition.name &&
-      toolSchemaNames.filter((name) => name === toolDefinition.name).length > 1
-    ) {
-      errors.push(`Tool duplicada: "${toolDefinition.name}".`);
+    if (tool.name && toolNames.filter((name) => name === tool.name).length > 1) {
+      errors.push(`Tool duplicada: "${tool.name}".`);
     }
-    if (typeof toolDefinition.matches !== "function") {
-      errors.push(`La tool "${toolDefinition.name}" no define matches().`);
-    } else if (
-      !toolDefinition.matches(
-        createToolCall({
-          name: toolDefinition.schema.name,
-          args: {},
-          actor: "registry-validation",
-        })
-      )
-    ) {
-      errors.push(`La tool "${toolDefinition.name}" no matchea su propio schema.name.`);
-    }
-    if (typeof toolDefinition.execute !== "function") {
-      errors.push(`La tool "${toolDefinition.name}" no define execute().`);
-    }
-    if (typeof toolDefinition.validate !== "function") {
-      errors.push(`La tool "${toolDefinition.name}" no define validate().`);
+    if (!tool.matches(createToolCall({ name: tool.name, args: {}, actor: "registry" }))) {
+      errors.push(`La tool "${tool.name}" no matchea su propio nombre.`);
     }
   }
 
@@ -129,7 +133,7 @@ export function validateToolRegistry({ toolRegistry, subagentDefinitions }) {
     agentIds.add(definition.id);
 
     for (const toolName of definition.allowedTools) {
-      if (!toolSchemaNameSet.has(toolName)) {
+      if (!toolNameSet.has(toolName)) {
         errors.push(
           `Subagente "${definition.name}" referencia una tool inexistente: "${toolName}".`
         );
@@ -155,45 +159,45 @@ export async function executeToolCall({
 }) {
   const toolCall = createToolCall({ name: toolName, args, actor });
 
-  console.log(`\n🔧 [${actor}] ${toolName}(${JSON.stringify(toolCall.args)})`);
+  console.log(`\n🔧 [${actor}] ${toolCall.name}(${JSON.stringify(toolCall.args)})`);
 
-  const toolDefinition = toolRegistry.find(toolCall);
-  if (!toolDefinition) {
-    const missingTool = `Error: tool "${toolName}" no existe`;
+  const tool = toolRegistry.find(toolCall);
+  if (!tool) {
+    const missingTool = `Error: tool "${toolCall.name}" no existe`;
     if (state) addObservation(state, actor, missingTool, { toolName, args: toolCall.args });
     return missingTool;
   }
 
-  const policyResult = toolDefinition.validate(toolCall);
-  if (!policyResult.allowed) {
-    console.log(`🚫 ${policyResult.reason}\n`);
+  const validation = tool.validate(toolCall);
+  if (!validation.allowed) {
+    console.log(`🚫 ${validation.reason}\n`);
     if (state) {
-      addObservation(state, actor, policyResult.reason, {
+      addObservation(state, actor, validation.reason, {
         toolName,
         args: toolCall.args,
       });
     }
-    return policyResult.reason;
+    return validation.reason;
   }
 
-  const approvalPattern = toolDefinition.requiresApproval(toolCall);
-  const needsSupervision = supervision && toolDefinition.supervised;
+  const approvalPattern = tool.requiresApproval(toolCall);
+  const needsSupervision = supervision && tool.supervised;
   const needsPolicyApproval = Boolean(approvalPattern);
 
   if (needsSupervision || needsPolicyApproval) {
     const reason = needsPolicyApproval
       ? `requiere aprobación por política "${approvalPattern}"`
       : "requiere aprobación por supervisión";
-    const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (${reason}) (s/n): `);
+    const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolCall.name}? (${reason}) (s/n): `);
     if (confirm.toLowerCase() !== "s") {
-      const rejection = `El usuario rechazó ejecutar ${toolName}. No realices esta acción.`;
+      const rejection = `El usuario rechazó ejecutar ${toolCall.name}. No realices esta acción.`;
       console.log("🚫 Acción rechazada por el usuario\n");
       if (state) addObservation(state, actor, rejection, { toolName, args: toolCall.args });
       return rejection;
     }
   }
 
-  const result = await toolDefinition.execute(toolCall);
-  if (state) recordToolUse(state, toolCall, result);
+  const result = await tool.execute(toolCall);
+  if (state) recordToolUse(state, tool, toolCall, result);
   return String(result);
 }

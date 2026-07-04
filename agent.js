@@ -6,7 +6,7 @@ import { searchRag } from "./src/rag.js";
 import { createProjectMemoryStore, nowIso } from "./project-memory/index.js";
 import {
   TOOL_ACCESS_GROUPS,
-  createLocalToolDefinitions,
+  createLocalTools,
   toolSet,
 } from "./tools/local-tools.js";
 import {
@@ -95,7 +95,7 @@ const SUBAGENT_DEFINITIONS = [
 ];
 
 const toolRegistry = createToolRegistry(
-  createLocalToolDefinitions({
+  createLocalTools({
     agentConfig,
     projectMemory,
     searchRag,
@@ -160,28 +160,25 @@ function addModifiedFile(state, path, actor) {
   }
 }
 
-function recordToolUse(state, actor, toolName, args, result) {
-  const normalizedArgs = args || {};
+function recordToolUse(state, tool, toolCall, result) {
+  const normalizedArgs = toolCall.args || {};
   const resultPreview = preview(result, 900);
 
   state.toolCalls.push({
     at: nowIso(),
-    actor,
-    toolName,
+    actor: toolCall.actor,
+    toolName: toolCall.name,
     args: normalizedArgs,
     resultPreview,
   });
 
-  const toolDefinition = toolRegistry.find(toolName);
-  if (!toolDefinition?.audit) return;
-
-  const audit = toolDefinition.audit({ args: normalizedArgs, resultPreview }) || {};
+  const audit = tool.audit({ toolCall, args: normalizedArgs, resultPreview }) || {};
   for (const source of audit.sources || []) {
-    addSource(state, { actor, ...source });
+    addSource(state, { actor: toolCall.actor, ...source });
   }
 
   if (audit.modifiedFile) {
-    addModifiedFile(state, audit.modifiedFile, actor);
+    addModifiedFile(state, audit.modifiedFile, toolCall.actor);
   }
 }
 

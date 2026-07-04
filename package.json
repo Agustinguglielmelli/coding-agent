@@ -1,8 +1,8 @@
 {
   "type": "module",
   "scripts": {
-    "rag:build": "node scripts/build-rag.js",
-    "test": "node test.js"
+    "start": "node agent.js",
+    "rag:build": "node scripts/build-rag.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

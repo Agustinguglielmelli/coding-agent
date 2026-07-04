@@ -2,9 +2,20 @@ import OpenAI from "openai";
 import dotenv from "dotenv";
 import readline from "readline";
 import fs from "fs";
-import { execSync } from "child_process";
-import { basename, dirname } from "path";
 import { searchRag } from "./src/rag.js";
+import { createProjectMemoryStore, nowIso } from "./project-memory/index.js";
+import {
+  TOOL_ACCESS_GROUPS,
+  createLocalToolDefinitions,
+  toolSet,
+} from "./tools/local-tools.js";
+import {
+  createToolRegistry,
+  executeToolCall,
+  validateToolRegistry,
+} from "./tools/tool-interface.js";
+import { normalizePathForPolicy } from "./tools/policies.js";
+
 dotenv.config();
 
 const client = new OpenAI({
@@ -14,6 +25,11 @@ const client = new OpenAI({
 
 const MODEL = "models/gemini-2.5-flash";
 const CONFIG_PATH = "./agent.config.json";
+const MULTI_AGENT_MAX_TOOL_ROUNDS = 6;
+const MULTI_AGENT_COMMANDS = ["/multiagent", "multiagent"];
+
+let SUPERVISION = true;
+let PLAN_MODE = true;
 
 function loadAgentConfig() {
   try {
@@ -29,556 +45,409 @@ function loadAgentConfig() {
 }
 
 const agentConfig = loadAgentConfig();
-const PROJECT_MEMORY_PATH =
-  agentConfig.memory?.project_file || "memory/projects/default.json";
-const MAX_SESSION_SUMMARIES = agentConfig.memory?.max_session_summaries || 20;
-const MAX_ITEMS_PER_SECTION = agentConfig.memory?.max_items_per_section || 50;
+const projectMemory = createProjectMemoryStore(agentConfig);
 
-// ============================================================
-// FLAGS — activar/desactivar acá
-// ============================================================
-let SUPERVISION = true;  // pide confirmación antes de write_file y run_command
-let PLAN_MODE = true;    // genera un plan antes de ejecutar cualquier tool
-
-const SUPERVISED_TOOLS = ["write_file", "run_command"];
-const PLAN_MODE_DISABLED_TOOLS = ["write_file"];
-
-// ============================================================
-// POLITICAS DESDE agent.config.json
-// ============================================================
-
-function normalizePathForPolicy(path) {
-  return String(path).replaceAll("\\", "/").replace(/^\.\//, "");
-}
-
-function globToRegExp(pattern) {
-  const normalizedPattern = normalizePathForPolicy(pattern);
-  let regex = "";
-
-  for (let i = 0; i < normalizedPattern.length; i += 1) {
-    const char = normalizedPattern[i];
-    const nextChar = normalizedPattern[i + 1];
-
-    if (char === "*" && nextChar === "*") {
-      regex += ".*";
-      i += 1;
-      continue;
-    }
-
-    if (char === "*") {
-      regex += "[^/]*";
-      continue;
-    }
-
-    if ("\\^$+?.()|{}[]".includes(char)) {
-      regex += `\\${char}`;
-      continue;
-    }
-
-    regex += char;
-  }
-
-  return new RegExp(`^${regex}$`);
-}
-
-function matchesPolicyPattern(pattern, value) {
-  const normalizedValue = normalizePathForPolicy(value);
-  const normalizedPattern = normalizePathForPolicy(pattern);
-  const regex = globToRegExp(normalizedPattern);
-
-  if (regex.test(normalizedValue)) return true;
-  if (!normalizedPattern.includes("/")) return regex.test(basename(normalizedValue));
-  return false;
-}
-
-function isPathDenied(path, action) {
-  const denyPatterns = agentConfig.permissions?.[action]?.deny || [];
-  return denyPatterns.find((pattern) => matchesPolicyPattern(pattern, path));
-}
-
-function isCommandDenied(command) {
-  const denyPatterns = agentConfig.permissions?.commands?.deny || [];
-  return denyPatterns.find((pattern) => command.includes(pattern));
-}
-
-function commandRequiresApproval(command) {
-  const approvalPatterns = agentConfig.permissions?.commands?.require_approval || [];
-  return approvalPatterns.find((pattern) => command.includes(pattern));
-}
-
-function validateToolCall(toolName, args) {
-  if (toolName === "read_file") {
-    const deniedBy = isPathDenied(args.path, "read");
-    if (deniedBy) {
-      return {
-        allowed: false,
-        reason: `Politica de lectura bloqueo "${args.path}" por patron "${deniedBy}".`,
-      };
-    }
-  }
-
-  if (toolName === "list_files") {
-    const deniedBy = isPathDenied(args.directory, "read");
-    if (deniedBy) {
-      return {
-        allowed: false,
-        reason: `Politica de lectura bloqueo "${args.directory}" por patron "${deniedBy}".`,
-      };
-    }
-  }
-
-  if (toolName === "write_file") {
-    const deniedBy = isPathDenied(args.path, "write");
-    if (deniedBy) {
-      return {
-        allowed: false,
-        reason: `Politica de escritura bloqueo "${args.path}" por patron "${deniedBy}".`,
-      };
-    }
-  }
-
-  if (toolName === "run_command") {
-    const deniedBy = isCommandDenied(args.command);
-    if (deniedBy) {
-      return {
-        allowed: false,
-        reason: `Politica de comandos bloqueo "${args.command}" por patron "${deniedBy}".`,
-      };
-    }
-  }
-
-  return { allowed: true };
-}
-
-// ============================================================
-// MEMORIA PERSISTENTE POR PROYECTO
-// ============================================================
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function createDefaultProjectMemory() {
-  return {
-    schemaVersion: 1,
-    project: agentConfig.project || {},
-    workspace: agentConfig.workspace || ".",
-    architecture: {
-      summary: "",
-      detectedAt: null,
-      stack: [],
-      importantFiles: [],
-      modules: [],
-    },
-    dependencies: [],
-    commands: [],
-    conventions: [],
-    decisions: [],
-    bugs: [],
-    sessionSummaries: [],
-    usefulFindings: [],
-    updatedAt: nowIso(),
-  };
-}
-
-function ensureProjectMemory() {
-  try {
-    if (!fs.existsSync(PROJECT_MEMORY_PATH)) {
-      fs.mkdirSync(dirname(PROJECT_MEMORY_PATH), { recursive: true });
-      fs.writeFileSync(
-        PROJECT_MEMORY_PATH,
-        JSON.stringify(createDefaultProjectMemory(), null, 2),
-        "utf-8"
-      );
-    }
-
-    return JSON.parse(fs.readFileSync(PROJECT_MEMORY_PATH, "utf-8"));
-  } catch (err) {
-    return {
-      ...createDefaultProjectMemory(),
-      usefulFindings: [
-        {
-          title: "Error leyendo memoria persistente",
-          content: err.message,
-          source: "agent",
-          tags: ["memory-error"],
-          createdAt: nowIso(),
-        },
-      ],
-    };
-  }
-}
-
-function saveProjectMemory(memory) {
-  memory.updatedAt = nowIso();
-  fs.mkdirSync(dirname(PROJECT_MEMORY_PATH), { recursive: true });
-  fs.writeFileSync(PROJECT_MEMORY_PATH, JSON.stringify(memory, null, 2), "utf-8");
-}
-
-function normalizeTags(tags) {
-  if (!tags) return [];
-  if (Array.isArray(tags)) return tags.map(String);
-  return [String(tags)];
-}
-
-function trimMemoryList(items, maxItems = MAX_ITEMS_PER_SECTION) {
-  return items.slice(Math.max(items.length - maxItems, 0));
-}
-
-function buildMemoryEntry({ title, content, source, tags, metadata }) {
-  return {
-    title: title || "Entrada sin titulo",
-    content,
-    source: source || "agent",
-    tags: normalizeTags(tags),
-    metadata: metadata || {},
-    createdAt: nowIso(),
-  };
-}
-
-function read_project_memory() {
-  const memory = ensureProjectMemory();
-  console.log(`✅ read_project_memory("${PROJECT_MEMORY_PATH}")`);
-  return JSON.stringify(memory, null, 2);
-}
-
-function update_project_memory(args) {
-  const { section, title, content, source, tags, metadata } = args;
-  const memory = ensureProjectMemory();
-  const entry = buildMemoryEntry({ title, content, source, tags, metadata });
-
-  switch (section) {
-    case "architecture":
-      memory.architecture.summary = content;
-      memory.architecture.detectedAt = nowIso();
-      if (metadata?.stack) memory.architecture.stack = metadata.stack;
-      if (metadata?.importantFiles) memory.architecture.importantFiles = metadata.importantFiles;
-      if (metadata?.modules) memory.architecture.modules = metadata.modules;
-      break;
-    case "dependency":
-      memory.dependencies.push(entry);
-      memory.dependencies = trimMemoryList(memory.dependencies);
-      break;
-    case "command":
-      memory.commands.push(entry);
-      memory.commands = trimMemoryList(memory.commands);
-      break;
-    case "convention":
-      memory.conventions.push(entry);
-      memory.conventions = trimMemoryList(memory.conventions);
-      break;
-    case "decision":
-      memory.decisions.push(entry);
-      memory.decisions = trimMemoryList(memory.decisions);
-      break;
-    case "bug":
-      memory.bugs.push(entry);
-      memory.bugs = trimMemoryList(memory.bugs);
-      break;
-    case "session_summary":
-      memory.sessionSummaries.push(entry);
-      memory.sessionSummaries = trimMemoryList(memory.sessionSummaries, MAX_SESSION_SUMMARIES);
-      break;
-    case "useful_finding":
-      memory.usefulFindings.push(entry);
-      memory.usefulFindings = trimMemoryList(memory.usefulFindings);
-      break;
-    default:
-      return `Error: sección de memoria inválida: ${section}`;
-  }
-
-  saveProjectMemory(memory);
-  console.log(`✅ update_project_memory("${section}")`);
-  return `Memoria actualizada en ${PROJECT_MEMORY_PATH}: ${section}`;
-}
-
-// ============================================================
-// TOOLS — implementación
-// ============================================================
-
-function read_file(path) {
-  try {
-    const content = fs.readFileSync(path, "utf-8");
-    console.log(`✅ read_file("${path}")`);
-    return content;
-  } catch (err) {
-    if (err.code === "ENOENT") return `Error: File not found at ${path}`;
-    return `Error reading file ${path}: ${err.message}`;
-  }
-}
-
-function write_file({ path, content }) {
-  try {
-    fs.mkdirSync(dirname(path), { recursive: true });
-    fs.writeFileSync(path, content, "utf-8");
-    console.log(`✅ write_file("${path}")`);
-    return `Archivo escrito exitosamente: ${path}`;
-  } catch (err) {
-    console.log(`❌ write_file error: ${err.message}`);
-    return `Error writing file ${path}: ${err.message}`;
-  }
-}
-
-function run_command({ command }) {
-  try {
-    console.log(`✅ run_command("${command}")`);
-    const stdout = execSync(command, { encoding: "utf-8", timeout: 10000 });
-    return stdout || "(sin output)";
-  } catch (err) {
-    const output = (err.stdout || "") + (err.stderr || "");
-    console.log(`⚠️  run_command salió con error`);
-    return output || err.message;
-  }
-}
-
-function list_files({ directory }) {
-  try {
-    const items = fs.readdirSync(directory, { withFileTypes: true });
-    const result = items.map((item) =>
-      item.isDirectory() ? `📁 ${item.name}/` : `📄 ${item.name}`
-    );
-    console.log(`✅ list_files("${directory}") — ${result.length} items`);
-    return result.join("\n");
-  } catch (err) {
-    console.log(`❌ list_files error: ${err.message}`);
-    return `Error listing directory ${directory}: ${err.message}`;
-  }
-}
-
-async function web_search({ query }) {
-  try {
-    console.log(`✅ web_search("${query}")`);
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: process.env.TAVILY_API_KEY,
-        query,
-        max_results: 3,
-      }),
-    });
-    const data = await res.json();
-    if (!data.results) {
-      return `Error: Tavily no devolvió resultados. Detalle: ${JSON.stringify(data)}`;
-    }
-    const results = data.results
-      .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.content}`)
-      .join("\n\n");
-    return results || "Sin resultados";
-  } catch (err) {
-    return `Error en web_search: ${err.message}`;
-  }
-}
-
-function search_rag({ query, top_k }) {
-  try {
-    const results = searchRag(query, agentConfig, { topK: top_k });
-    console.log(`✅ search_rag("${query}") — ${results.length} resultados`);
-
-    if (results.length === 0) {
-      return "RAG no encontro fragmentos relevantes. Usar web_search solo si falta evidencia.";
-    }
-
-    return results
-      .map((result, index) => {
-        const score = result.score.toFixed(3);
-        return [
-          `${index + 1}. ${result.metadata.title}`,
-          `   score: ${score}`,
-          `   fuente: ${result.metadata.source}`,
-          `   archivo: ${result.metadata.file}`,
-          `   chunk: ${result.metadata.chunk}`,
-          `   contenido: ${result.text}`,
-        ].join("\n");
-      })
-      .join("\n\n");
-  } catch (err) {
-    return `Error en search_rag: ${err.message}`;
-  }
-}
-
-// ============================================================
-// SCHEMAS
-// ============================================================
-
-const tools = [
+const SUBAGENT_DEFINITIONS = [
   {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Lee el contenido de un archivo dado su path.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "Path del archivo a leer." },
-        },
-        required: ["path"],
-      },
-    },
+    id: "explorer",
+    name: "Explorer",
+    responsibility:
+      "Entiende el repositorio: estructura, arquitectura, dependencias, convenciones y archivos relevantes.",
+    allowedTools: toolSet(TOOL_ACCESS_GROUPS.memoryRead, TOOL_ACCESS_GROUPS.repoRead),
+    guidance:
+      "Debe dejar suficiente contexto en el estado compartido para que Implementer y Tester no necesiten leer memoria.",
   },
   {
-    type: "function",
-    function: {
-      name: "write_file",
-      description: "Escribe contenido en un archivo, reemplazando su contenido actual.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "Path del archivo a escribir." },
-          content: { type: "string", description: "Contenido a escribir en el archivo." },
-        },
-        required: ["path", "content"],
-      },
-    },
+    id: "researcher",
+    name: "Researcher",
+    responsibility:
+      "Busca evidencia primero en RAG y memoria. Usa web_search solo si el RAG no alcanza.",
+    allowedTools: toolSet(TOOL_ACCESS_GROUPS.memoryRead, TOOL_ACCESS_GROUPS.research),
+    guidance: "Debe resumir fuentes y decisiones tecnicas para los agentes ejecutores.",
   },
   {
-    type: "function",
-    function: {
-      name: "run_command",
-      description: "Ejecuta un comando de terminal y devuelve el output (stdout y stderr).",
-      parameters: {
-        type: "object",
-        properties: {
-          command: { type: "string", description: "Comando a ejecutar." },
-        },
-        required: ["command"],
-      },
-    },
+    id: "implementer",
+    name: "Implementer",
+    responsibility:
+      "Propone o realiza cambios concretos de codigo a partir de los hallazgos disponibles.",
+    allowedTools: toolSet(TOOL_ACCESS_GROUPS.codeChange),
+    guidance:
+      "No lee memoria ni consulta RAG. Ejecuta con el contexto que dejaron Explorer y Researcher en el estado compartido.",
   },
   {
-    type: "function",
-    function: {
-      name: "list_files",
-      description: "Lista los archivos y carpetas en un directorio.",
-      parameters: {
-        type: "object",
-        properties: {
-          directory: { type: "string", description: "Path del directorio a listar." },
-        },
-        required: ["directory"],
-      },
-    },
+    id: "tester",
+    name: "Tester",
+    responsibility:
+      "Valida el resultado con tests, build, lint, logs u otros checks definidos por el proyecto.",
+    allowedTools: toolSet(TOOL_ACCESS_GROUPS.verification),
+    guidance:
+      "No lee memoria ni consulta RAG. Valida usando el pedido, el estado compartido y los cambios registrados.",
   },
   {
-    type: "function",
-    function: {
-      name: "web_search",
-      description: "Busca información en la web. Usá esta tool cuando necesites información externa o documentación.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Consulta de búsqueda." },
-        },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_rag",
-      description:
-        "Busca primero en la base RAG local de NestJS, TypeScript y notas del proyecto. Devuelve fragmentos recuperados con fuente, archivo, chunk y score.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "Consulta tecnica para recuperar contexto relevante.",
-          },
-          top_k: {
-            type: "number",
-            description: "Cantidad maxima de fragmentos a recuperar.",
-          },
-        },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_project_memory",
-      description:
-        "Lee la memoria persistente del proyecto actual: arquitectura, decisiones, bugs, comandos, convenciones y resúmenes previos.",
-      parameters: {
-        type: "object",
-        properties: {},
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "update_project_memory",
-      description:
-        "Guarda una observación persistente del proyecto para futuras sesiones del agente.",
-      parameters: {
-        type: "object",
-        properties: {
-          section: {
-            type: "string",
-            enum: [
-              "architecture",
-              "dependency",
-              "command",
-              "convention",
-              "decision",
-              "bug",
-              "session_summary",
-              "useful_finding",
-            ],
-            description: "Sección de memoria donde guardar la información.",
-          },
-          title: { type: "string", description: "Título breve de la entrada." },
-          content: {
-            type: "string",
-            description: "Contenido concreto que debe persistir.",
-          },
-          source: {
-            type: "string",
-            description:
-              "Origen de la información: repo, usuario, RAG, web, inferencia o agente.",
-          },
-          tags: {
-            type: "array",
-            items: { type: "string" },
-            description: "Etiquetas para recuperar esta entrada luego.",
-          },
-          metadata: {
-            type: "object",
-            description:
-              "Datos estructurados opcionales. Para architecture puede incluir stack, importantFiles y modules.",
-          },
-        },
-        required: ["section", "content"],
-      },
-    },
+    id: "reviewer",
+    name: "Reviewer",
+    responsibility:
+      "Revisa el diff o los cambios realizados y valida que respondan al pedido del usuario.",
+    allowedTools: toolSet(TOOL_ACCESS_GROUPS.memoryRead, TOOL_ACCESS_GROUPS.review),
+    guidance:
+      "Puede consultar memoria o RAG solo para validar criterios que no esten claros en el estado compartido.",
   },
 ];
 
-const toolFunctions = {
-  read_file: (args) => read_file(args.path),
-  write_file,
-  run_command,
-  list_files,
-  web_search,
-  search_rag,
-  read_project_memory,
-  update_project_memory,
-};
+const toolRegistry = createToolRegistry(
+  createLocalToolDefinitions({
+    agentConfig,
+    projectMemory,
+    searchRag,
+  })
+);
 
-function getToolsForCurrentMode() {
-  if (!PLAN_MODE) return tools;
+validateToolRegistry({
+  toolRegistry,
+  subagentDefinitions: SUBAGENT_DEFINITIONS,
+});
 
-  return tools.filter(
-    (tool) => !PLAN_MODE_DISABLED_TOOLS.includes(tool.function.name)
-  );
+function preview(value, maxLength = 700) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
 }
 
-// ============================================================
-// PLAN MODE — pedir plan al LLM antes de ejecutar
-// ============================================================
+function createSharedTaskState(originalRequest) {
+  return {
+    id: `task-${Date.now()}`,
+    originalRequest,
+    status: "running",
+    startedAt: nowIso(),
+    completedAt: null,
+    progress: [],
+    subagents: {},
+    sourcesConsulted: [],
+    filesModified: [],
+    observations: [],
+    toolCalls: [],
+    repeatedActions: [],
+  };
+}
+
+function addProgress(state, actor, message) {
+  state.progress.push({
+    at: nowIso(),
+    actor,
+    message,
+  });
+}
+
+function addObservation(state, actor, message, metadata = {}) {
+  state.observations.push({
+    at: nowIso(),
+    actor,
+    message,
+    metadata,
+  });
+}
+
+function addSource(state, source) {
+  state.sourcesConsulted.push({
+    at: nowIso(),
+    ...source,
+  });
+}
+
+function addModifiedFile(state, path, actor) {
+  if (!state.filesModified.some((entry) => entry.path === path)) {
+    state.filesModified.push({ path, firstModifiedBy: actor, at: nowIso() });
+  }
+}
+
+function recordToolUse(state, actor, toolName, args, result) {
+  const normalizedArgs = args || {};
+  const resultPreview = preview(result, 900);
+
+  state.toolCalls.push({
+    at: nowIso(),
+    actor,
+    toolName,
+    args: normalizedArgs,
+    resultPreview,
+  });
+
+  const toolDefinition = toolRegistry.find(toolName);
+  if (!toolDefinition?.audit) return;
+
+  const audit = toolDefinition.audit({ args: normalizedArgs, resultPreview }) || {};
+  for (const source of audit.sources || []) {
+    addSource(state, { actor, ...source });
+  }
+
+  if (audit.modifiedFile) {
+    addModifiedFile(state, audit.modifiedFile, actor);
+  }
+}
+
+function buildStateForPrompt(state) {
+  return {
+    id: state.id,
+    originalRequest: state.originalRequest,
+    status: state.status,
+    progress: state.progress.slice(-12),
+    completedSubagents: Object.fromEntries(
+      Object.entries(state.subagents).map(([name, value]) => [
+        name,
+        {
+          status: value.status,
+          summary: preview(value.summary, 1200),
+        },
+      ])
+    ),
+    sourcesConsulted: state.sourcesConsulted.slice(-12),
+    filesModified: state.filesModified,
+    observations: state.observations.slice(-12),
+    repeatedActions: state.repeatedActions.slice(-8),
+  };
+}
+
+function getMultiAgentTask(input) {
+  const trimmed = input.trim();
+  const command = MULTI_AGENT_COMMANDS.find(
+    (item) => trimmed === item || trimmed.startsWith(`${item} `)
+  );
+
+  if (!command) return null;
+  return trimmed.slice(command.length).trim();
+}
+
+function taskRequestsReadOnly(originalRequest) {
+  const normalized = normalizePathForPolicy(originalRequest).toLowerCase();
+  return [
+    "solo lectura",
+    "read-only",
+    "read only",
+    "no modifiques archivos",
+    "no modificar archivos",
+    "no cambies archivos",
+    "no escribir archivos",
+  ].some((phrase) => normalized.includes(phrase));
+}
+
+function ask(question) {
+  return new Promise((resolve) => rl.question(question, resolve));
+}
+
+async function executeToolForActor(toolName, args, actor, state = null) {
+  return executeToolCall({
+    toolRegistry,
+    toolName,
+    args,
+    actor,
+    supervision: SUPERVISION,
+    ask,
+    state,
+    addObservation,
+    recordToolUse,
+  });
+}
+
+function buildSubagentSystemPrompt(definition) {
+  return [
+    `Sos ${definition.name}, un subagente especializado dentro de un coding agent multi-agente.`,
+    `Responsabilidad: ${definition.responsibility}`,
+    `Guia de handoff: ${definition.guidance}`,
+    `Tools permitidas: ${definition.allowedTools.join(", ")}.`,
+    "Trabajas sobre el estado compartido de la tarea. No inventes evidencia.",
+    "Diferenciá repo, memoria, RAG, web e inferencias propias cuando informes hallazgos.",
+    "Si repetis una accion sin avanzar, cambiá de estrategia o explica que falta evidencia.",
+    "Respondé al final con un resumen breve en español: hallazgos, evidencia usada, riesgos y siguiente paso recomendado.",
+  ].join("\n");
+}
+
+async function runSubagent(definition, state) {
+  addProgress(state, definition.name, "Inicio de subagente.");
+  console.log(`\n🤖 ${definition.name}: ${definition.responsibility}`);
+
+  const allowedTools = toolRegistry.getOpenAiToolsByName(definition.allowedTools);
+  const localMessages = [
+    {
+      role: "system",
+      content: buildSubagentSystemPrompt(definition),
+    },
+    {
+      role: "user",
+      content: [
+        `Pedido original: ${state.originalRequest}`,
+        "Estado compartido actual:",
+        JSON.stringify(buildStateForPrompt(state), null, 2),
+        "Trabaja solo en tu responsabilidad. Usa tools si hace falta evidencia.",
+      ].join("\n\n"),
+    },
+  ];
+  const seenToolCalls = new Set();
+
+  for (let round = 1; round <= MULTI_AGENT_MAX_TOOL_ROUNDS; round += 1) {
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      messages: localMessages,
+      tools: allowedTools,
+      tool_choice: "auto",
+    });
+
+    const message = response.choices[0].message;
+
+    if (!message.tool_calls) {
+      const summary = message.content || "(sin resumen)";
+      state.subagents[definition.name] = {
+        status: "completed",
+        summary,
+        completedAt: nowIso(),
+      };
+      addProgress(state, definition.name, "Finalizó con resumen.");
+      console.log(`\n${summary}\n`);
+      return summary;
+    }
+
+    localMessages.push(message);
+
+    for (const toolCall of message.tool_calls) {
+      const toolName = toolCall.function.name;
+      const args = JSON.parse(toolCall.function.arguments || "{}");
+
+      if (!definition.allowedTools.includes(toolName)) {
+        const rejection = `${definition.name} no tiene permiso para usar ${toolName}.`;
+        localMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: rejection,
+        });
+        addObservation(state, definition.name, rejection, { toolName, args });
+        continue;
+      }
+
+      const callKey = `${toolName}:${JSON.stringify(args)}`;
+      if (seenToolCalls.has(callKey)) {
+        const loopMessage =
+          `Accion repetida detectada en ${definition.name}: ${callKey}. ` +
+          "Cambia de estrategia o explica que falta evidencia.";
+        state.repeatedActions.push({
+          at: nowIso(),
+          actor: definition.name,
+          toolName,
+          args,
+        });
+        addObservation(state, definition.name, loopMessage, { toolName, args });
+        localMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: loopMessage,
+        });
+        continue;
+      }
+
+      seenToolCalls.add(callKey);
+      const result = await executeToolForActor(toolName, args, definition.name, state);
+      localMessages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: result,
+      });
+    }
+  }
+
+  const summary =
+    `${definition.name} alcanzo el limite de ${MULTI_AGENT_MAX_TOOL_ROUNDS} rondas ` +
+    "sin cerrar una respuesta final.";
+  state.subagents[definition.name] = {
+    status: "stopped",
+    summary,
+    completedAt: nowIso(),
+  };
+  addObservation(state, definition.name, summary);
+  console.log(`\n⚠️  ${summary}\n`);
+  return summary;
+}
+
+function formatMultiAgentReport(state) {
+  const lines = [
+    "\n================ MULTI-AGENT TASK STATE ================",
+    `ID: ${state.id}`,
+    `Pedido: ${state.originalRequest}`,
+    `Estado: ${state.status}`,
+    "",
+    "Subagentes:",
+  ];
+
+  for (const definition of SUBAGENT_DEFINITIONS) {
+    const result = state.subagents[definition.name];
+    lines.push(`- ${definition.name}: ${result?.status || "sin ejecutar"}`);
+    if (result?.summary) lines.push(`  ${preview(result.summary, 350)}`);
+  }
+
+  lines.push("", "Fuentes consultadas:");
+  const sources = state.sourcesConsulted.slice(-10);
+  if (sources.length === 0) {
+    lines.push("- Ninguna registrada.");
+  } else {
+    for (const source of sources) {
+      const label = source.path || source.query || source.command || source.detail;
+      lines.push(`- ${source.type} (${source.actor}): ${preview(label, 180)}`);
+    }
+  }
+
+  lines.push("", "Archivos modificados:");
+  if (state.filesModified.length === 0) {
+    lines.push("- Ninguno.");
+  } else {
+    for (const file of state.filesModified) {
+      lines.push(`- ${file.path} (${file.firstModifiedBy})`);
+    }
+  }
+
+  if (state.repeatedActions.length > 0) {
+    lines.push("", "Acciones repetidas detectadas:");
+    for (const action of state.repeatedActions.slice(-5)) {
+      lines.push(`- ${action.actor}: ${action.toolName} ${JSON.stringify(action.args)}`);
+    }
+  }
+
+  lines.push("========================================================\n");
+  return lines.join("\n");
+}
+
+async function runMultiAgentWorkflow(originalRequest) {
+  const state = createSharedTaskState(originalRequest);
+  addProgress(state, "MainAgent", "Tarea recibida y estado compartido creado.");
+  console.log(`\n🧭 MainAgent: coordinando tarea multi-agente ${state.id}`);
+
+  for (const definition of SUBAGENT_DEFINITIONS) {
+    await runSubagent(definition, state);
+  }
+
+  state.status = "completed";
+  state.completedAt = nowIso();
+  addProgress(state, "MainAgent", "Todos los subagentes finalizaron.");
+
+  const report = formatMultiAgentReport(state);
+
+  if (taskRequestsReadOnly(originalRequest)) {
+    console.log("ℹ️  Tarea en modo solo lectura: no se guarda resumen en memoria persistente.");
+  } else {
+    projectMemory.update({
+      section: "session_summary",
+      title: `Ejecucion multi-agente ${state.id}`,
+      content: report,
+      source: "agent",
+      tags: ["phase-5", "multi-agent"],
+      metadata: {
+        taskId: state.id,
+        filesModified: state.filesModified.map((file) => file.path),
+        sources: state.sourcesConsulted.map((source) => source.type),
+        subagents: Object.keys(state.subagents),
+      },
+    });
+  }
+
+  console.log(report);
+  return state;
+}
 
 async function getPlan(userMessage) {
   const response = await client.chat.completions.create({
@@ -598,18 +467,10 @@ async function getPlan(userMessage) {
   return response.choices[0].message.content;
 }
 
-// ============================================================
-// LOOP DE CONVERSACIÓN
-// ============================================================
-
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
 });
-
-function ask(question) {
-  return new Promise((resolve) => rl.question(question, resolve));
-}
 
 const messages = [
   {
@@ -620,22 +481,20 @@ const messages = [
 ];
 
 async function main() {
-  ensureProjectMemory();
-  console.log(`Coding Agent listo.`);
+  projectMemory.ensure();
+  console.log("Coding Agent listo.");
   console.log(`  Proyecto:     ${agentConfig.project?.name || "sin nombre"}`);
-  console.log(`  Memoria:      ${PROJECT_MEMORY_PATH}`);
+  console.log(`  Memoria:      ${projectMemory.path}`);
   console.log(`  Supervisión: ${SUPERVISION ? "✅ activada" : "❌ desactivada"}`);
   console.log(`  Plan mode:   ${PLAN_MODE ? "✅ activado" : "❌ desactivado"}`);
   if (PLAN_MODE) {
-    console.log(`  Tools off:    ${PLAN_MODE_DISABLED_TOOLS.join(", ")}`);
+    console.log(`  Tools off:    ${toolRegistry.getPlanModeDisabledToolNames().join(", ")}`);
   }
-  console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | 'exit'\n`);
+  console.log(`\nComandos: 'supervision on/off' | 'plan on/off' | '/multiagent <tarea>' | 'exit'\n`);
 
-  // Loop externo
   while (true) {
     const input = await ask("> ");
 
-    // Comandos de control
     if (input.toLowerCase() === "exit") {
       console.log("Saliendo...");
       rl.close();
@@ -654,7 +513,11 @@ async function main() {
     if (input.toLowerCase() === "plan on") {
       PLAN_MODE = true;
       console.log("✅ Plan mode activado\n");
-      console.log(`Tools deshabilitadas en plan mode: ${PLAN_MODE_DISABLED_TOOLS.join(", ")}\n`);
+      console.log(
+        `Tools deshabilitadas en plan mode: ${toolRegistry
+          .getPlanModeDisabledToolNames()
+          .join(", ")}\n`
+      );
       continue;
     }
     if (input.toLowerCase() === "plan off") {
@@ -663,7 +526,17 @@ async function main() {
       continue;
     }
 
-    // ── PLAN MODE ────────────────────────────────────────────
+    const multiAgentTask = getMultiAgentTask(input);
+    if (multiAgentTask !== null) {
+      if (!multiAgentTask) {
+        console.log("Uso: /multiagent <tarea a resolver>\n");
+        continue;
+      }
+
+      await runMultiAgentWorkflow(multiAgentTask);
+      continue;
+    }
+
     if (PLAN_MODE) {
       console.log("\n📋 Generando plan...\n");
       const plan = await getPlan(input);
@@ -683,20 +556,17 @@ async function main() {
           content: `${input}\n\nPlan sugerido:\n${plan}\n\nModificación del usuario: ${modification}`,
         });
       } else {
-        // aprobado — agregar mensaje original
         messages.push({ role: "user", content: input });
       }
     } else {
       messages.push({ role: "user", content: input });
     }
-    // ─────────────────────────────────────────────────────────
 
-    // Loop interno — ejecuta tools hasta que el LLM responde sin pedir ninguna
     while (true) {
       const response = await client.chat.completions.create({
         model: MODEL,
         messages,
-        tools: getToolsForCurrentMode(),
+        tools: toolRegistry.getOpenAiToolsForMode({ planMode: PLAN_MODE }),
         tool_choice: "auto",
       });
 
@@ -708,47 +578,7 @@ async function main() {
         for (const toolCall of message.tool_calls) {
           const toolName = toolCall.function.name;
           const args = JSON.parse(toolCall.function.arguments);
-
-          console.log(`\n🔧 ${toolName}(${JSON.stringify(args)})`);
-
-          const policyResult = validateToolCall(toolName, args);
-          if (!policyResult.allowed) {
-            console.log(`🚫 ${policyResult.reason}\n`);
-            messages.push({
-              role: "tool",
-              tool_call_id: toolCall.id,
-              content: policyResult.reason,
-            });
-            continue;
-          }
-
-          // ── SUPERVISIÓN ──────────────────────────────────────
-          const approvalPattern =
-            toolName === "run_command" ? commandRequiresApproval(args.command) : null;
-          const needsSupervision = SUPERVISION && SUPERVISED_TOOLS.includes(toolName);
-          const needsPolicyApproval = Boolean(approvalPattern);
-
-          if (needsSupervision || needsPolicyApproval) {
-            const reason = needsPolicyApproval
-              ? `requiere aprobación por política "${approvalPattern}"`
-              : "requiere aprobación por supervisión";
-            const confirm = await ask(`⚠️  ¿Confirmás ejecutar ${toolName}? (${reason}) (s/n): `);
-            if (confirm.toLowerCase() !== "s") {
-              console.log("🚫 Acción rechazada por el usuario\n");
-              messages.push({
-                role: "tool",
-                tool_call_id: toolCall.id,
-                content: `El usuario rechazó ejecutar ${toolName}. No realices esta acción.`,
-              });
-              continue;
-            }
-          }
-          // ─────────────────────────────────────────────────────
-
-          const toolFn = toolFunctions[toolName];
-          const result = toolFn
-            ? await toolFn(args)
-            : `Error: tool "${toolName}" no existe`;
+          const result = await executeToolForActor(toolName, args, "MainAgent");
 
           messages.push({
             role: "tool",
@@ -758,7 +588,7 @@ async function main() {
         }
       } else {
         messages.push(message);
-        console.log("\n" + message.content + "\n");
+        console.log(`\n${message.content}\n`);
         break;
       }
     }

@@ -85,7 +85,7 @@ Al finalizar una ejecucion multi-agente, el agente guarda un resumen en la memor
 
 Para agregar agentes o ajustar permisos, editar `SUBAGENT_DEFINITIONS` en `agent.js`. Los permisos reutilizables estan en `TOOL_ACCESS_GROUPS`, definidos en `tools/local-tools.js`, y `validateToolRegistry()` falla al iniciar si un subagente referencia una tool inexistente.
 
-Para agregar una tool nueva, agregar una entrada en `tools/local-tools.js` usando `createToolDefinition()`. Cada tool implementa la misma interfaz extensible: `schema`, `matches`, `validate`, `execute` y opcionalmente `requiresApproval`, `audit`, `supervised` o `disabledInPlanMode`. El agente principal y los subagentes ejecutan tools a traves de `tools/tool-interface.js`, por lo que no hace falta agregar `if (toolName === "...")` en `agent.js`.
+Para agregar una tool nueva, crear una clase en `tools/local-tools.js` que extienda `Tool` e implemente, como minimo, `matches(toolCall)`, `validate(toolCall)` y `execute(toolCall)`. La clase tambien puede sobrescribir `requiresApproval(toolCall)` y `audit(...)`, o activar `supervised` / `disabledInPlanMode` en el constructor. El agente principal y los subagentes ejecutan tools a traves de `ToolRegistry` en `tools/tool-interface.js`, por lo que no hace falta agregar `if (toolName === "...")` en `agent.js`.
 
 La memoria persistente vive en `project-memory/index.js`. Para agregar una nueva seccion o cambiar como se actualiza una clave de memoria, agregar un handler en `createProjectMemoryHandlers()`. Cada handler define `section`, `matches` y `update`, evitando un switch gigante en el agente.
 

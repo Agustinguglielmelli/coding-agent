@@ -1,7 +1,7 @@
 import { ask, closeIO } from "./io.js";
 import { runAgentLoop } from "./agentLoop.js";
 import { settings } from "./settings.js";
-import { client, MODEL } from "./llmClient.js";
+import { client, MODEL, RESPONSE_MAX_TOKENS } from "./llmClient.js";
 import { agentConfig, PROJECT_MEMORY_PATH } from "./config.js";
 import { ensureProjectMemory } from "./memory.js";
 import { tools, toolFunctions } from "./tools/index.js";
@@ -42,6 +42,7 @@ async function getPlan(userMessage) {
         content: userMessage,
       },
     ],
+    max_tokens: RESPONSE_MAX_TOKENS,
   });
   return response.choices[0].message.content;
 }

@@ -24,8 +24,9 @@ import { startActiveObservation } from "@langfuse/tracing";
 // Acá se interpreta ese resultado: qué entra al estado compartido, y si se
 // sigue a la próxima etapa o se corta la cadena.
 
-const MAX_CONTEXT_CHARS = 5000;
-const MAX_SUMMARY_AGENT_CHARS = 1500;
+const MAX_CONTEXT_CHARS = 20000;
+const MAX_SUMMARY_AGENT_CHARS = 12000;
+const MAX_SOURCE_PREVIEW_CHARS = 4000;
 
 function truncate(text, max = MAX_CONTEXT_CHARS) {
   if (!text) return "";
@@ -50,7 +51,7 @@ function recordToolCalls(state, subagentName, toolCalls) {
         subagent: subagentName,
         tool: call.name,
         query: call.args.query,
-        preview: truncate(call.result, 300),
+        preview: truncate(call.result, MAX_SOURCE_PREVIEW_CHARS),
       });
     }
 

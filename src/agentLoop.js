@@ -1,4 +1,4 @@
-import { client, MODEL } from "./llmClient.js";
+import { client, MODEL, RESPONSE_MAX_TOKENS } from "./llmClient.js";
 import { validateToolCall, commandRequiresApproval } from "./policies.js";
 import { ask } from "./io.js";
 import { settings, SUPERVISED_TOOLS } from "./settings.js";
@@ -51,6 +51,7 @@ export async function runAgentLoop({
       messages: fullMessages,
       tools,
       tool_choice: "auto",
+      max_tokens: RESPONSE_MAX_TOKENS,
     });
 
     const message = response.choices[0].message;
@@ -150,13 +151,14 @@ export async function runAgentLoop({
   const response = await client.chat.completions.create({
     model: MODEL,
     messages: fullMessages,
+    max_tokens: RESPONSE_MAX_TOKENS,
   });
   const message = response.choices[0].message;
   fullMessages.push(message);
   return { messages: fullMessages, finalText: message.content, toolCalls, loopDetected };
 }
 
-function compactValue(value, max = 4000) {
+function compactValue(value, max = 12000) {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max)}\n[...truncado para Langfuse...]` : text;

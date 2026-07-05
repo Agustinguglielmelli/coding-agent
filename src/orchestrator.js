@@ -13,6 +13,7 @@ import { runResearcher } from "./agents/researcher.js";
 import { runImplementer } from "./agents/implementer.js";
 import { runTester } from "./agents/tester.js";
 import { runReviewer } from "./agents/reviewer.js";
+import { startActiveObservation } from "@langfuse/tracing";
 
 // ============================================================
 // ORQUESTADOR — el "agente principal"
@@ -66,26 +67,40 @@ function hasAllowedToolCall(toolCalls, name) {
 }
 
 export async function runTask(originalRequest) {
-  const state = createTaskState(originalRequest);
+  return startActiveObservation("multiagent-task", async (span) => {
+    span.update({
+      input: { originalRequest },
+      metadata: {
+        mode: "multiagent",
+        agents: ["explorer", "researcher", "implementer", "tester", "reviewer"],
+      },
+    });
 
-  // ── EXPLORER ─────────────────────────────────────────────
-  console.log("\n🧭 Explorer explorando el repositorio...\n");
-  const explorerResult = await runExplorer({ task: originalRequest });
-  updateTaskState(state, {
-    subagentResults: { ...state.subagentResults, explorer: explorerResult.finalText },
-  });
-  recordToolCalls(state, "explorer", explorerResult.toolCalls);
+    const state = createTaskState(originalRequest);
 
-  // ── RESEARCHER ───────────────────────────────────────────
-  console.log("\n🔎 Researcher buscando información...\n");
-  const researcherResult = await runResearcher({
-    task: originalRequest,
-    context: explorerResult.finalText,
-  });
-  updateTaskState(state, {
-    subagentResults: { ...state.subagentResults, researcher: researcherResult.finalText },
-  });
-  recordToolCalls(state, "researcher", researcherResult.toolCalls);
+    // ── EXPLORER ─────────────────────────────────────────────
+    console.log("\n🧭 Explorer explorando el repositorio...\n");
+    const explorerResult = await traceSubagent("explorer", { task: originalRequest }, () =>
+      runExplorer({ task: originalRequest })
+    );
+    updateTaskState(state, {
+      subagentResults: { ...state.subagentResults, explorer: explorerResult.finalText },
+    });
+    recordToolCalls(state, "explorer", explorerResult.toolCalls);
+
+    // ── RESEARCHER ───────────────────────────────────────────
+    console.log("\n🔎 Researcher buscando información...\n");
+    const researcherInput = {
+      task: originalRequest,
+      context: explorerResult.finalText,
+    };
+    const researcherResult = await traceSubagent("researcher", researcherInput, () =>
+      runResearcher(researcherInput)
+    );
+    updateTaskState(state, {
+      subagentResults: { ...state.subagentResults, researcher: researcherResult.finalText },
+    });
+    recordToolCalls(state, "researcher", researcherResult.toolCalls);
 
   // ── ROUTER ───────────────────────────────────────────────
   // Con Explorer y Researcher ya corridos (son de solo lectura y sirven
@@ -109,76 +124,85 @@ export async function runTask(originalRequest) {
     ["Hallazgos de Explorer", explorerResult.finalText],
     ["Hallazgos de Researcher", researcherResult.finalText],
   ]);
-  const implementerResult = await runImplementer({
-    task: originalRequest,
-    context: implementerContext,
-  });
+      const implementerInput = {
+          task: originalRequest,
+          context: implementerContext,
+      };
+      const implementerResult = await traceSubagent("implementer", implementerInput, () =>
+          runImplementer(implementerInput)
+      );
   updateTaskState(state, {
     subagentResults: { ...state.subagentResults, implementer: implementerResult.finalText },
   });
   recordToolCalls(state, "implementer", implementerResult.toolCalls);
 
-  // Señal mecánica (no de texto libre): si no hubo ningún write_file
-  // permitido, el Implementer no aplicó cambios. Puede ser porque el
-  // pedido era ambiguo, faltaba evidencia, o el cambio era riesgoso — en
-  // cualquier caso, no tiene sentido correr Tester ni Reviewer sobre nada.
-  if (!hasAllowedToolCall(implementerResult.toolCalls, "write_file")) {
+    // Señal mecánica (no de texto libre): si no hubo ningún write_file
+    // permitido, el Implementer no aplicó cambios. Puede ser porque el
+    // pedido era ambiguo, faltaba evidencia, o el cambio era riesgoso — en
+    // cualquier caso, no tiene sentido correr Tester ni Reviewer sobre nada.
+    if (!hasAllowedToolCall(implementerResult.toolCalls, "write_file")) {
+      addObservation(
+        state,
+        `Implementer no aplicó cambios de archivo. Respuesta: ${implementerResult.finalText}`
+      );
+      updateTaskState(state, { status: "blocked" });
+      return finishWithTrace(state, span);
+    }
+
+    // ── TESTER ───────────────────────────────────────────────
+    console.log("\n🧪 Tester validando los cambios...\n");
+    const testerInput = {
+      task: originalRequest,
+      context: implementerResult.finalText,
+    };
+    const testerResult = await traceSubagent("tester", testerInput, () => runTester(testerInput));
+    updateTaskState(state, {
+      subagentResults: { ...state.subagentResults, tester: testerResult.finalText },
+    });
+    recordToolCalls(state, "tester", testerResult.toolCalls);
+
+    const testerBlocked =
+      testerResult.loopDetected || /bloquead/i.test(testerResult.finalText || "");
+    if (testerBlocked) {
+      addObservation(
+        state,
+        testerResult.loopDetected
+          ? `Tester detectó una acción repetida sin avanzar y se detuvo. Respuesta: ${testerResult.finalText}`
+          : `Tester reportó que los checks fallaron. Respuesta: ${testerResult.finalText}`
+      );
+      updateTaskState(state, { status: "blocked" });
+      return finishWithTrace(state, span);
+    }
+
+    // ── REVIEWER ─────────────────────────────────────────────
+    console.log("\n✅ Reviewer revisando el diff...\n");
+    const reviewerContext = joinContext([
+      ["Cambios de Implementer", implementerResult.finalText],
+      ["Resultado de Tester", testerResult.finalText],
+    ]);
+    const reviewerInput = {
+      task: originalRequest,
+      context: reviewerContext,
+    };
+    const reviewerResult = await traceSubagent("reviewer", reviewerInput, () =>
+      runReviewer(reviewerInput)
+    );
+    updateTaskState(state, {
+      subagentResults: { ...state.subagentResults, reviewer: reviewerResult.finalText },
+    });
+    recordToolCalls(state, "reviewer", reviewerResult.toolCalls);
+
+    const reviewerObserved = /observad/i.test(reviewerResult.finalText || "");
     addObservation(
       state,
-      `Implementer no aplicó cambios de archivo. Respuesta: ${implementerResult.finalText}`
+      reviewerObserved
+        ? `Reviewer dejó observaciones sobre el diff: ${reviewerResult.finalText}`
+        : `Reviewer aprobó el diff: ${reviewerResult.finalText}`
     );
-    updateTaskState(state, { status: "blocked" });
-    return finish(state);
-  }
+    updateTaskState(state, { status: reviewerObserved ? "blocked" : "done" });
 
-  // ── TESTER ───────────────────────────────────────────────
-  console.log("\n🧪 Tester validando los cambios...\n");
-  const testerResult = await runTester({
-    task: originalRequest,
-    context: implementerResult.finalText,
+    return finishWithTrace(state, span);
   });
-  updateTaskState(state, {
-    subagentResults: { ...state.subagentResults, tester: testerResult.finalText },
-  });
-  recordToolCalls(state, "tester", testerResult.toolCalls);
-
-  const testerBlocked = testerResult.loopDetected || /bloquead/i.test(testerResult.finalText || "");
-  if (testerBlocked) {
-    addObservation(
-      state,
-      testerResult.loopDetected
-        ? `Tester detectó una acción repetida sin avanzar y se detuvo. Respuesta: ${testerResult.finalText}`
-        : `Tester reportó que los checks fallaron. Respuesta: ${testerResult.finalText}`
-    );
-    updateTaskState(state, { status: "blocked" });
-    return finish(state);
-  }
-
-  // ── REVIEWER ─────────────────────────────────────────────
-  console.log("\n✅ Reviewer revisando el diff...\n");
-  const reviewerContext = joinContext([
-    ["Cambios de Implementer", implementerResult.finalText],
-    ["Resultado de Tester", testerResult.finalText],
-  ]);
-  const reviewerResult = await runReviewer({
-    task: originalRequest,
-    context: reviewerContext,
-  });
-  updateTaskState(state, {
-    subagentResults: { ...state.subagentResults, reviewer: reviewerResult.finalText },
-  });
-  recordToolCalls(state, "reviewer", reviewerResult.toolCalls);
-
-  const reviewerObserved = /observad/i.test(reviewerResult.finalText || "");
-  addObservation(
-    state,
-    reviewerObserved
-      ? `Reviewer dejó observaciones sobre el diff: ${reviewerResult.finalText}`
-      : `Reviewer aprobó el diff: ${reviewerResult.finalText}`
-  );
-  updateTaskState(state, { status: reviewerObserved ? "blocked" : "done" });
-
-  return finish(state);
 }
 
 // Cierre común a cualquier camino (éxito o bloqueo): deja evidencia en disco
@@ -196,6 +220,45 @@ function finish(state) {
 
   const savedTo = saveTaskState(state);
   return { state, summary: buildSummary(state), savedTo };
+}
+
+function finishWithTrace(state, span) {
+  const result = finish(state);
+  span.update({
+    output: {
+      status: state.status,
+      summary: result.summary,
+      savedTo: result.savedTo,
+    },
+    metadata: {
+      sourcesCount: state.sources.length,
+      filesModifiedCount: state.filesModified.length,
+      observationsCount: state.observations.length,
+    },
+  });
+  return result;
+}
+
+async function traceSubagent(name, input, fn) {
+  return startActiveObservation(
+    `subagent:${name}`,
+    async (span) => {
+      span.update({ input });
+      const result = await fn();
+
+      span.update({
+        output: result.finalText,
+        metadata: {
+          subagent: name,
+          toolCalls: result.toolCalls?.length || 0,
+          loopDetected: result.loopDetected || false,
+        },
+      });
+
+      return result;
+    },
+    { asType: "agent" }
+  );
 }
 
 export function buildSummary(state) {

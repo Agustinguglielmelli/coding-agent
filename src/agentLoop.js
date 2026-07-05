@@ -2,6 +2,7 @@ import { client, MODEL } from "./llmClient.js";
 import { validateToolCall, commandRequiresApproval } from "./policies.js";
 import { ask } from "./io.js";
 import { settings, SUPERVISED_TOOLS } from "./settings.js";
+import { startActiveObservation } from "@langfuse/tracing";
 
 // ============================================================
 // LOOP GENÉRICO DE AGENTE
@@ -105,7 +106,9 @@ export async function runAgentLoop({
       // ─────────────────────────────────────────────────────
 
       const toolFn = toolFunctions[toolName];
-      const result = toolFn ? await toolFn(args) : `Error: tool "${toolName}" no existe`;
+      const result = await traceToolCall(toolName, args, async () =>
+        toolFn ? await toolFn(args) : `Error: tool "${toolName}" no existe`
+      );
       const resultText = String(result);
 
       fullMessages.push({
@@ -151,4 +154,47 @@ export async function runAgentLoop({
   const message = response.choices[0].message;
   fullMessages.push(message);
   return { messages: fullMessages, finalText: message.content, toolCalls, loopDetected };
+}
+
+function compactValue(value, max = 4000) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}\n[...truncado para Langfuse...]` : text;
+}
+
+async function traceToolCall(toolName, args, fn) {
+  return startActiveObservation(
+    `tool:${toolName}`,
+    async (span) => {
+      span.update({
+        input: args,
+        metadata: {
+          toolName,
+        },
+      });
+
+      try {
+        const result = await fn();
+        span.update({
+          output: compactValue(result),
+          metadata: {
+            toolName,
+            outputLength: String(result).length,
+          },
+        });
+        return result;
+      } catch (err) {
+        span.update({
+          level: "ERROR",
+          statusMessage: err.message,
+          output: { error: err.message },
+          metadata: {
+            toolName,
+          },
+        });
+        throw err;
+      }
+    },
+    { asType: "tool" }
+  );
 }

@@ -5,6 +5,10 @@
     "rag:build": "node scripts/build-rag.js"
   },
   "dependencies": {
+    "@langfuse/openai": "^5.9.1",
+    "@langfuse/otel": "^5.9.1",
+    "@langfuse/tracing": "^5.9.1",
+    "@opentelemetry/sdk-node": "^0.220.0",
     "dotenv": "^17.4.2",
     "openai": "^6.38.0"
   }

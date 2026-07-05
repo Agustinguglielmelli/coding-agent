@@ -126,3 +126,17 @@ Cuando responda o implemente, debe distinguir:
 - Repository: persistencia o acceso a datos.
 - DTO: contrato y validacion de entrada.
 - Module: registro e inyeccion de dependencias.
+
+## Aplicacion A Rival Match
+
+En Rival Match la separacion existe en la mayoria de modulos:
+
+- `controller`: rutas HTTP y pipes.
+- `service`: reglas de negocio.
+- `repository`: acceso Prisma.
+- `input`: datos de entrada con class-validator.
+- `dto`: datos de salida.
+
+Para tareas sobre `rival-search`, el service suele ser el centro de la regla de negocio y el repository encapsula Prisma. Para tareas sobre `match`, tener en cuenta que muchos matches se crean o actualizan desde el flujo de aceptar/rechazar busquedas rivales, no necesariamente desde un endpoint directo de `match`.
+
+El agente no debe crear nuevos repositories, tokens o providers si el cambio se resuelve modificando inputs, services o repositories existentes.

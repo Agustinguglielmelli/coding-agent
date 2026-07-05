@@ -6,6 +6,7 @@ import { agentConfig, PROJECT_MEMORY_PATH } from "./config.js";
 import { ensureProjectMemory } from "./memory.js";
 import { tools, toolFunctions } from "./tools/index.js";
 import { runTask } from "./orchestrator.js";
+import { getWorkspaceRoot } from "./workspace.js";
 
 // ============================================================
 // FLAGS — activar/desactivar acá
@@ -52,8 +53,7 @@ async function getPlan(userMessage) {
 let messages = [
   {
     role: "system",
-    content:
-      "Sos un agente de código especializado en el proyecto configurado. Podés leer y escribir archivos, ejecutar comandos, listar directorios, consultar RAG, buscar en la web y usar memoria persistente del proyecto. Antes de trabajar sobre una tarea del proyecto, consultá read_project_memory. Para dudas tecnicas de NestJS, TypeScript o patrones del proyecto, consultá primero search_rag y mostra que fuentes usaste. Usá web_search solo como fallback cuando el RAG no tenga evidencia suficiente. Cuando detectes arquitectura, comandos útiles, decisiones, convenciones, bugs o un resumen importante de sesión, guardalo con update_project_memory indicando si la fuente fue repo, usuario, RAG, web, inferencia o agente.",
+    content: `Sos un agente de código especializado en el proyecto configurado. El workspace raíz del proyecto objetivo es ${getWorkspaceRoot()}; cuando uses paths relativos como "." o "src", las tools los resuelven contra ese workspace. Podés leer y escribir archivos, ejecutar comandos, listar directorios, consultar RAG, buscar en la web y usar memoria persistente del proyecto. Antes de trabajar sobre una tarea del proyecto, consultá read_project_memory. Para dudas tecnicas de NestJS, TypeScript o patrones del proyecto, consultá primero search_rag y mostra que fuentes usaste. Usá web_search solo como fallback cuando el RAG no tenga evidencia suficiente. Cuando detectes arquitectura, comandos útiles, decisiones, convenciones, bugs o un resumen importante de sesión, guardalo con update_project_memory indicando si la fuente fue repo, usuario, RAG, web, inferencia o agente.`,
   },
 ];
 
@@ -61,6 +61,7 @@ export async function main() {
   ensureProjectMemory();
   console.log(`Coding Agent listo.`);
   console.log(`  Proyecto:     ${agentConfig.project?.name || "sin nombre"}`);
+  console.log(`  Workspace:    ${getWorkspaceRoot()}`);
   console.log(`  Memoria:      ${PROJECT_MEMORY_PATH}`);
   console.log(`  Supervisión: ${settings.supervision ? "✅ activada" : "❌ desactivada"}`);
   console.log(`  Plan mode:   ${PLAN_MODE ? "✅ activado" : "❌ desactivado"}`);

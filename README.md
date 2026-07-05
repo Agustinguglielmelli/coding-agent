@@ -25,7 +25,11 @@ Variables esperadas en `.env`:
 ```bash
 GEMINI_API_KEY=...
 TAVILY_API_KEY=...
+AGENT_WORKSPACE=../rivalmatch-back # opcional; sobreescribe agent.config.json
 ```
+
+El workspace del proyecto objetivo también puede configurarse en `agent.config.json`.
+Las tools de archivos y comandos resuelven paths relativos contra ese workspace.
 
 ## Uso
 

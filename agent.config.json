@@ -4,7 +4,7 @@
     "ecosystem": "NestJS + TypeScript",
     "description": "Proyecto objetivo definido para el TP final del coding agent avanzado."
   },
-  "workspace": ".",
+  "workspace": "../rivalmatch-back",
   "memory": {
     "project_file": "memory/projects/rival-match.json",
     "max_session_summaries": 20,

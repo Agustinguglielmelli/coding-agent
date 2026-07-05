@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import { observeOpenAI } from "@langfuse/openai";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const provider = process.env.LLM_PROVIDER || (process.env.OPENAI_API_KEY ? "openai" : "gemini");
 

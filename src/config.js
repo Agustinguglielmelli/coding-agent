@@ -1,4 +1,7 @@
 import fs from "fs";
+import dotenv from "dotenv";
+
+dotenv.config({ quiet: true });
 
 export const CONFIG_PATH = "./agent.config.json";
 

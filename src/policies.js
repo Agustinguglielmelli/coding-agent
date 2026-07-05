@@ -1,5 +1,6 @@
 import { basename } from "path";
 import { agentConfig } from "./config.js";
+import { pathForPolicy } from "./workspace.js";
 
 // ============================================================
 // POLITICAS DESDE agent.config.json
@@ -51,7 +52,8 @@ export function matchesPolicyPattern(pattern, value) {
 
 export function isPathDenied(path, action) {
   const denyPatterns = agentConfig.permissions?.[action]?.deny || [];
-  return denyPatterns.find((pattern) => matchesPolicyPattern(pattern, path));
+  const policyPath = pathForPolicy(path);
+  return denyPatterns.find((pattern) => matchesPolicyPattern(pattern, policyPath));
 }
 
 export function isCommandDenied(command) {

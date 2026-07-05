@@ -24,7 +24,8 @@ import { startActiveObservation } from "@langfuse/tracing";
 // Acá se interpreta ese resultado: qué entra al estado compartido, y si se
 // sigue a la próxima etapa o se corta la cadena.
 
-const MAX_CONTEXT_CHARS = 1500;
+const MAX_CONTEXT_CHARS = 5000;
+const MAX_SUMMARY_AGENT_CHARS = 1500;
 
 function truncate(text, max = MAX_CONTEXT_CHARS) {
   if (!text) return "";
@@ -115,7 +116,7 @@ export async function runTask(originalRequest) {
       "Router clasificó la tarea como informativa: Explorer y Researcher alcanzaron para responder, no se ejecutó Implementer/Tester/Reviewer."
     );
     updateTaskState(state, { status: "done" });
-    return finish(state);
+    return finishWithTrace(state, span);
   }
 
   // ── IMPLEMENTER ──────────────────────────────────────────
@@ -270,7 +271,7 @@ export function buildSummary(state) {
   ];
 
   for (const [name, text] of Object.entries(state.subagentResults)) {
-    lines.push(`- ${name}: ${truncate(text, 300)}`);
+    lines.push(`- ${name}: ${truncate(text, MAX_SUMMARY_AGENT_CHARS)}`);
   }
 
   lines.push("", `Fuentes consultadas: ${state.sources.length}`);

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { observeOpenAI } from "@langfuse/openai";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -10,7 +11,7 @@ export const MODEL =
     ? process.env.OPENAI_MODEL || "gpt-4.1-mini"
     : process.env.GEMINI_MODEL || "models/gemini-2.5-flash";
 
-export const client =
+const rawClient =
   provider === "openai"
     ? new OpenAI({
         apiKey: process.env.OPENAI_API_KEY,
@@ -19,3 +20,5 @@ export const client =
         apiKey: process.env.GEMINI_API_KEY,
         baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
       });
+
+export const client = observeOpenAI(rawClient);

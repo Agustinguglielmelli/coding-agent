@@ -7,6 +7,7 @@ import {
   saveTaskState,
 } from "./taskState.js";
 import { update_project_memory } from "./memory.js";
+import { classifyTask } from "./router.js";
 import { runExplorer } from "./agents/explorer.js";
 import { runResearcher } from "./agents/researcher.js";
 import { runImplementer } from "./agents/implementer.js";
@@ -101,23 +102,39 @@ export async function runTask(originalRequest) {
     });
     recordToolCalls(state, "researcher", researcherResult.toolCalls);
 
-    // ── IMPLEMENTER ──────────────────────────────────────────
-    console.log("\n🛠️  Implementer aplicando cambios...\n");
-    const implementerContext = joinContext([
-      ["Hallazgos de Explorer", explorerResult.finalText],
-      ["Hallazgos de Researcher", researcherResult.finalText],
-    ]);
-    const implementerInput = {
-      task: originalRequest,
-      context: implementerContext,
-    };
-    const implementerResult = await traceSubagent("implementer", implementerInput, () =>
-      runImplementer(implementerInput)
+  // ── ROUTER ───────────────────────────────────────────────
+  // Con Explorer y Researcher ya corridos (son de solo lectura y sirven
+  // igual para cualquier tipo de pedido), decidimos si hace falta seguir
+  // a Implementer/Tester/Reviewer o si esto era una consulta informativa
+  // que ya quedó respondida. Evita que una pregunta termine marcada como
+  // "blocked" solo porque Implementer no tuvo ningún archivo para tocar.
+  const taskType = await classifyTask(originalRequest);
+  if (taskType === "informative") {
+    addObservation(
+      state,
+      "Router clasificó la tarea como informativa: Explorer y Researcher alcanzaron para responder, no se ejecutó Implementer/Tester/Reviewer."
     );
-    updateTaskState(state, {
-      subagentResults: { ...state.subagentResults, implementer: implementerResult.finalText },
-    });
-    recordToolCalls(state, "implementer", implementerResult.toolCalls);
+    updateTaskState(state, { status: "done" });
+    return finish(state);
+  }
+
+  // ── IMPLEMENTER ──────────────────────────────────────────
+  console.log("\n🛠️  Implementer aplicando cambios...\n");
+  const implementerContext = joinContext([
+    ["Hallazgos de Explorer", explorerResult.finalText],
+    ["Hallazgos de Researcher", researcherResult.finalText],
+  ]);
+      const implementerInput = {
+          task: originalRequest,
+          context: implementerContext,
+      };
+      const implementerResult = await traceSubagent("implementer", implementerInput, () =>
+          runImplementer(implementerInput)
+      );
+  updateTaskState(state, {
+    subagentResults: { ...state.subagentResults, implementer: implementerResult.finalText },
+  });
+  recordToolCalls(state, "implementer", implementerResult.toolCalls);
 
     // Señal mecánica (no de texto libre): si no hubo ningún write_file
     // permitido, el Implementer no aplicó cambios. Puede ser porque el

@@ -11,3 +11,15 @@ Los controllers suelen usar decoradores como `@Controller`, `@Get`, `@Post`, `@P
 Los services suelen anotarse con `@Injectable`. Si un service depende de otro provider, se recibe por constructor. Esto facilita testing porque se pueden reemplazar dependencias con mocks.
 
 En una arquitectura NestJS mantenible, las responsabilidades se separan por dominio o feature. Por ejemplo, `matches`, `users`, `auth` o `rankings` pueden tener su propio modulo, controller, service, DTOs y tests.
+
+## Pipes Y Validacion
+
+NestJS permite aplicar pipes en parametros concretos, en controllers o de forma global. `ValidationPipe` es el pipe habitual para validar DTOs con class-validator. Cuando se usa `transform: true`, Nest puede transformar payloads a clases DTO y habilitar conversiones de class-transformer.
+
+## Inyeccion De Dependencias
+
+Los providers se registran en el modulo. Se pueden inyectar clases directamente o usar tokens string/symbol con `provide` y `useClass`. Antes de modificar providers, revisar el modulo actual y no introducir tokens nuevos si el proyecto ya funciona con el patron existente.
+
+## Criterio Para Cambios Pequenos
+
+Si la tarea es de validacion o contrato de entrada, normalmente no requiere tocar module ni repository. Primero revisar DTO/input y controller. Si la tarea es de regla de negocio, revisar service. Si la tarea es de persistencia, revisar repository y schema Prisma.

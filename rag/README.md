@@ -1,17 +1,20 @@
 # RAG - NestJS, TypeScript y Rival Match
 
-Esta carpeta contiene la base RAG local del agente para la fase 4 del TP final.
+Esta carpeta contiene la base RAG local del agente para las fases 4 y 5 del TP final. Combina documentacion tecnica de NestJS/TypeScript con notas especificas del proyecto Rival Match para que los subagentes puedan recuperar contexto antes de decidir o modificar codigo.
 
 ## Fuentes
 
 Las fuentes iniciales estan en `rag/sources`:
 
 - `nestjs-core.md`: patrones centrales de NestJS: modulos, controllers, providers, services y DTOs.
+- `nestjs-controller-service-repository.md`: separacion controller/service/repository y criterio para aplicar esa arquitectura.
 - `nestjs-validation-testing.md`: validacion con DTOs y testing en NestJS.
 - `typescript-nestjs-conventions.md`: convenciones TypeScript utiles para proyectos NestJS.
-- `rival-match-project-notes.md`: notas internas editables del proyecto Rival Match.
+- `rival-match-project-notes.md`: mapa general del dominio Rival Match, stack, modulos, modelos, convenciones y archivos clave.
+- `rival-match-domain-flows.md`: flujos funcionales del producto: registro, busqueda de rivales, aceptacion/rechazo, match, chat e historial.
+- `rival-match-testing-and-commands.md`: comandos reales del backend, estrategia de validacion y advertencias sobre lint/test.
 
-Cuando se analice el repositorio real de Rival Match, se pueden agregar nuevas fuentes Markdown con hallazgos del repo o documentacion especifica.
+Las fuentes de Rival Match deben actualizarse cuando cambie el repo o cuando una prueba revele que el agente no recupera suficiente contexto de dominio.
 
 ## Chunking
 
@@ -57,3 +60,10 @@ npm run rag:build
 ```
 
 El agente usa la tool `search_rag` para consultar esta base antes de usar busqueda web.
+
+## Criterio De Uso En Modo Multiagente
+
+- Explorer puede usar RAG para confirmar convenciones de NestJS o ubicar conocimiento previo del proyecto.
+- Researcher debe consultar primero RAG y usar web como fallback si no hay evidencia suficiente.
+- Implementer recibe el contexto resumido por Explorer y Researcher, por lo que el contenido de estas fuentes influye directamente en la precision de los cambios.
+- El summary final del orquestador muestra las fuentes recuperadas para usarlo como evidencia del entregable.

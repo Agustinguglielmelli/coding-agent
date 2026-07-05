@@ -3,12 +3,13 @@ import { run_command } from "./commandTools.js";
 import { web_search } from "./webTools.js";
 import { search_rag } from "./ragTool.js";
 import { read_project_memory, update_project_memory } from "../memory.js";
-
+import { loadPlugins } from "./plugin-loader.js";
+import { agentConfig } from "../config.js";
 // ============================================================
-// SCHEMAS
+// SCHEMAS — tools base (hardcodeadas)
 // ============================================================
 
-export const tools = [
+const baseTools = [
   {
     type: "function",
     function: {
@@ -85,7 +86,7 @@ export const tools = [
     function: {
       name: "search_rag",
       description:
-        "Busca primero en la base RAG local de NestJS, TypeScript y notas del proyecto. Devuelve fragmentos recuperados con fuente, archivo, chunk y score.",
+          "Busca primero en la base RAG local de NestJS, TypeScript y notas del proyecto. Devuelve fragmentos recuperados con fuente, archivo, chunk y score.",
       parameters: {
         type: "object",
         properties: {
@@ -107,7 +108,7 @@ export const tools = [
     function: {
       name: "read_project_memory",
       description:
-        "Lee la memoria persistente del proyecto actual: arquitectura, decisiones, bugs, comandos, convenciones y resúmenes previos.",
+          "Lee la memoria persistente del proyecto actual: arquitectura, decisiones, bugs, comandos, convenciones y resúmenes previos.",
       parameters: {
         type: "object",
         properties: {},
@@ -119,7 +120,7 @@ export const tools = [
     function: {
       name: "update_project_memory",
       description:
-        "Guarda una observación persistente del proyecto para futuras sesiones del agente.",
+          "Guarda una observación persistente del proyecto para futuras sesiones del agente.",
       parameters: {
         type: "object",
         properties: {
@@ -145,7 +146,7 @@ export const tools = [
           source: {
             type: "string",
             description:
-              "Origen de la información: repo, usuario, RAG, web, inferencia o agente.",
+                "Origen de la información: repo, usuario, RAG, web, inferencia o agente.",
           },
           tags: {
             type: "array",
@@ -155,7 +156,7 @@ export const tools = [
           metadata: {
             type: "object",
             description:
-              "Datos estructurados opcionales. Para architecture puede incluir stack, importantFiles y modules.",
+                "Datos estructurados opcionales. Para architecture puede incluir stack, importantFiles y modules.",
           },
         },
         required: ["section", "content"],
@@ -164,7 +165,8 @@ export const tools = [
   },
 ];
 
-export const toolFunctions = {
+// Funciones base
+const baseToolFunctions = {
   read_file: (args) => read_file(args.path),
   write_file,
   run_command,
@@ -173,4 +175,34 @@ export const toolFunctions = {
   search_rag,
   read_project_memory,
   update_project_memory,
+};
+
+// ============================================================
+// CARGA DE PLUGINS — auto-discovery
+// ============================================================
+
+const pluginInstances = await loadPlugins(agentConfig);
+
+// Agregar schemas de plugins al array de tools
+for (const plugin of pluginInstances) {
+  baseTools.push(plugin.toOpenAITool());
+}
+
+// Agregar funciones de plugins al mapa
+const pluginFunctions = Object.fromEntries(
+    pluginInstances.map((plugin) => [
+      plugin.name,
+      (args) => plugin.execute({ args }),
+    ])
+);
+
+// ============================================================
+// EXPORTS — tools y funciones unificadas (base + plugins)
+// ============================================================
+
+export const tools = baseTools;
+
+export const toolFunctions = {
+  ...baseToolFunctions,
+  ...pluginFunctions,
 };

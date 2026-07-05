@@ -29,5 +29,9 @@
       "deny": ["rm -rf", "git push", "sudo", "chmod 777"],
       "require_approval": ["npm install", "pnpm install", "yarn install", "pip install", "git commit"]
     }
+  },
+  "plugins": {
+    "enabled": ["git_status"],
+    "disabled": []
   }
 }
